@@ -39,29 +39,41 @@ CODEC_EXTENSIONS = {
 }
 
 
-def _get_device_names_windows() -> dict[int, str]:
-    """Query Windows for video capture device names via PowerShell."""
+def _get_device_names_windows() -> list[str]:
+    """Get DirectShow video device names in order using ffmpeg.
+
+    ffmpeg's dshow device listing matches OpenCV's device index ordering
+    since both enumerate DirectShow video input devices the same way.
+    """
+    import re
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_PnPEntity | "
-             "Where-Object { $_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image' } | "
-             "Select-Object -ExpandProperty Name"],
+            ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
             capture_output=True, text=True, timeout=5,
         )
-        names = [n.strip() for n in result.stdout.strip().splitlines() if n.strip()]
-        return {i: name for i, name in enumerate(names)}
+        # ffmpeg prints device list to stderr
+        output = result.stderr
+        names = []
+        for line in output.splitlines():
+            # Match lines like: [dshow @ ...] "Device Name" (video)
+            m = re.search(r'"(.+?)"\s+\(video\)', line)
+            if m:
+                names.append(m.group(1))
+        return names
+    except FileNotFoundError:
+        log.debug("ffmpeg not found, cannot enumerate device names")
+        return []
     except Exception as e:
-        log.debug("Failed to get device names: %s", e)
-        return {}
+        log.debug("Failed to get DirectShow device names: %s", e)
+        return []
 
 
 def enumerate_cameras(max_index: int = 10) -> list[tuple[int, str]]:
     """Probe device indices and return list of (index, name) for those that open.
 
-    On Windows, attempts to match device names from the system.
+    On Windows, uses DirectShow enumeration for correct device name ordering.
     """
-    device_names = _get_device_names_windows() if _IS_WINDOWS else {}
+    ds_names = _get_device_names_windows() if _IS_WINDOWS else []
     available = []
     # Suppress OpenCV warnings during device probing
     prev = os.environ.get("OPENCV_LOG_LEVEL", "")
@@ -70,7 +82,7 @@ def enumerate_cameras(max_index: int = 10) -> list[tuple[int, str]]:
         for i in range(max_index):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                name = device_names.get(i, f"Camera {i}")
+                name = ds_names[i] if i < len(ds_names) else f"Camera {i}"
                 available.append((i, name))
                 cap.release()
     finally:
@@ -212,16 +224,30 @@ class CameraThread(QThread):
             cap.get(cv2.CAP_PROP_FPS),
         )
 
-        retry_delay = 0.5
+        consecutive_failures = 0
+        max_failures_before_reopen = 5
         frame_interval = 1.0 / self._target_fps
         next_frame_time = time.monotonic()
         while self._running:
             ret, frame = cap.read()
             if not ret:
-                self.error.emit(self.camera_index, "Frame read failed, retrying...")
-                time.sleep(retry_delay)
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures_before_reopen:
+                    self.error.emit(self.camera_index,
+                                    f"Reopening camera {self.device_id} after {consecutive_failures} failures")
+                    cap.release()
+                    time.sleep(1.0)
+                    cap = cv2.VideoCapture(self.device_id)
+                    if cap.isOpened():
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._target_width)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._target_height)
+                        cap.set(cv2.CAP_PROP_FPS, self._target_fps)
+                    consecutive_failures = 0
+                else:
+                    time.sleep(0.5)
                 next_frame_time = time.monotonic()
                 continue
+            consecutive_failures = 0
 
             frame = process_frame(frame)
             self.frame_ready.emit(self.camera_index, frame)

@@ -1,5 +1,9 @@
+import json
 import logging
+import os
 import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +38,7 @@ from capture import (
     DummyCameraThread,
     enumerate_cameras,
 )
+from config import load_config, save_config
 from relay import MockRelayController, RelayController, scan_ports
 
 log = logging.getLogger(__name__)
@@ -58,16 +63,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Fish Capture" + (" [DUMMY]" if dummy else ""))
         self.setMinimumSize(1100, 700)
 
+        self._cfg = load_config()
         self._recording = False
         self._record_start: Optional[float] = None
+        self._record_out_dir: Optional[Path] = None
         self._cam_stats: dict[int, tuple[float, float, float]] = {}  # camera_index -> (fps, bitrate, latency_ms)
+        self._stats_log: list[dict] = []
         self._last_system_stats_time = 0.0
         self._pump_auto_enabled = False
         self._pump_on_time = 0.0  # seconds after capture start
         self._pump_off_time = 0.0
         self._pump_triggered_on = False
         self._pump_triggered_off = False
-        self._output_dir = str(Path.home() / "fish-capture")
+        self._output_dir = self._cfg.get("output_dir", str(Path.home() / "fish-capture"))
         self._latest_frames: dict[int, np.ndarray] = {}
 
         # Relay
@@ -152,7 +160,7 @@ class MainWindow(QMainWindow):
         row0 = QHBoxLayout()
         row0.addWidget(QLabel("Cam 0:"))
         self._cam0_combo = QComboBox()
-        self._populate_cam_combo(self._cam0_combo, default_index=0)
+        self._populate_cam_combo(self._cam0_combo, default_index=self._cfg.get("cam0_device", 0))
         self._cam0_combo.currentIndexChanged.connect(lambda: self._on_cam_device_changed(0))
         row0.addWidget(self._cam0_combo)
         layout.addLayout(row0)
@@ -161,7 +169,7 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Cam 1:"))
         self._cam1_combo = QComboBox()
-        self._populate_cam_combo(self._cam1_combo, default_index=1)
+        self._populate_cam_combo(self._cam1_combo, default_index=self._cfg.get("cam1_device", 1))
         self._cam1_combo.currentIndexChanged.connect(lambda: self._on_cam_device_changed(1))
         row1.addWidget(self._cam1_combo)
         layout.addLayout(row1)
@@ -239,10 +247,19 @@ class MainWindow(QMainWindow):
         group = QGroupBox("Capture")
         layout = QVBoxLayout(group)
 
+        # Video prefix
+        prefix_row = QHBoxLayout()
+        prefix_row.addWidget(QLabel("Prefix:"))
+        self._prefix_input = QLineEdit(self._cfg.get("video_prefix", ""))
+        self._prefix_input.setPlaceholderText("(timestamp)")
+        self._prefix_input.setToolTip("Video filename prefix. Leave blank to use timestamp.")
+        prefix_row.addWidget(self._prefix_input)
+        layout.addLayout(prefix_row)
+
         # Duration
         dur_row = QHBoxLayout()
         dur_row.addWidget(QLabel("Duration (mm:ss):"))
-        self._duration_input = QLineEdit("05:00")
+        self._duration_input = QLineEdit(self._cfg.get("duration", "05:00"))
         self._duration_input.setMaximumWidth(80)
         dur_row.addWidget(self._duration_input)
         layout.addLayout(dur_row)
@@ -253,7 +270,10 @@ class MainWindow(QMainWindow):
         self._res_combo = QComboBox()
         for w, h in RESOLUTIONS:
             self._res_combo.addItem(f"{w}x{h}", (w, h))
-        self._res_combo.setCurrentIndex(0)
+        # Restore saved resolution
+        saved_res = self._cfg.get("resolution", "640x480")
+        idx = self._res_combo.findText(saved_res)
+        self._res_combo.setCurrentIndex(idx if idx >= 0 else 0)
         res_row.addWidget(self._res_combo)
         layout.addLayout(res_row)
 
@@ -263,7 +283,9 @@ class MainWindow(QMainWindow):
         self._fps_combo = QComboBox()
         for fps in [15, 24, 30, 60]:
             self._fps_combo.addItem(str(fps), fps)
-        self._fps_combo.setCurrentIndex(2)  # default 30
+        saved_fps = self._cfg.get("fps", 30)
+        idx = self._fps_combo.findData(saved_fps)
+        self._fps_combo.setCurrentIndex(idx if idx >= 0 else 2)
         fps_row.addWidget(self._fps_combo)
         layout.addLayout(fps_row)
 
@@ -273,6 +295,10 @@ class MainWindow(QMainWindow):
         self._codec_combo = QComboBox()
         for name in CODECS:
             self._codec_combo.addItem(name)
+        saved_codec = self._cfg.get("codec", "FFV1")
+        idx = self._codec_combo.findText(saved_codec)
+        if idx >= 0:
+            self._codec_combo.setCurrentIndex(idx)
         codec_row.addWidget(self._codec_combo)
         layout.addLayout(codec_row)
 
@@ -321,16 +347,16 @@ class MainWindow(QMainWindow):
 
         # Auto timing
         self._pump_auto_check = QCheckBox("Auto pump during capture")
-        self._pump_auto_check.setChecked(True)
+        self._pump_auto_check.setChecked(self._cfg.get("pump_auto", True))
         layout.addWidget(self._pump_auto_check)
 
         auto_row = QHBoxLayout()
         auto_row.addWidget(QLabel("ON at (s):"))
-        self._pump_on_input = QLineEdit("120")
+        self._pump_on_input = QLineEdit(str(self._cfg.get("pump_on_time", 120)))
         self._pump_on_input.setMaximumWidth(60)
         auto_row.addWidget(self._pump_on_input)
         auto_row.addWidget(QLabel("OFF at (s):"))
-        self._pump_off_input = QLineEdit("240")
+        self._pump_off_input = QLineEdit(str(self._cfg.get("pump_off_time", 240)))
         self._pump_off_input.setMaximumWidth(60)
         auto_row.addWidget(self._pump_off_input)
         layout.addLayout(auto_row)
@@ -343,13 +369,18 @@ class MainWindow(QMainWindow):
 
     def _build_output_group(self) -> QGroupBox:
         group = QGroupBox("Output")
-        layout = QHBoxLayout(group)
+        layout = QVBoxLayout(group)
         self._output_label = QLabel(self._output_dir)
         self._output_label.setWordWrap(True)
-        layout.addWidget(self._output_label, stretch=1)
+        layout.addWidget(self._output_label)
+        btn_row = QHBoxLayout()
         browse_btn = QPushButton("Browse...")
         browse_btn.clicked.connect(self._pick_output_dir)
-        layout.addWidget(browse_btn)
+        btn_row.addWidget(browse_btn)
+        open_btn = QPushButton("Open Folder")
+        open_btn.clicked.connect(self._open_output_dir)
+        btn_row.addWidget(open_btn)
+        layout.addLayout(btn_row)
         return group
 
     def _build_pipeline_group(self) -> QGroupBox:
@@ -370,6 +401,17 @@ class MainWindow(QMainWindow):
             f, b, lat = self._cam_stats[idx]
             parts.append(f"Cam{idx}: {f:.1f}fps {b:.1f}Mb/s {lat:.1f}ms")
         self._status_stats.setText(" | ".join(parts))
+
+        # Accumulate for stats log
+        if self._recording:
+            elapsed = time.monotonic() - self._record_start if self._record_start else 0
+            self._stats_log.append({
+                "time_s": round(elapsed, 1),
+                "camera": camera_index,
+                "fps": round(fps, 2),
+                "bitrate_mbps": round(bitrate, 2),
+                "write_latency_ms": round(latency_ms, 2),
+            })
 
     def _on_camera_error(self, camera_index: int, message: str):
         log.warning("Camera %d error: %s", camera_index, message)
@@ -452,17 +494,23 @@ class MainWindow(QMainWindow):
                 cam.set_fps(fps)
                 cam.set_codec(codec)
 
-        # Create output directory
+        # Build folder and file prefix
         ext = CODEC_EXTENSIONS.get(codec, ".avi")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(self._output_dir) / timestamp
+        prefix = self._prefix_input.text().strip()
+        folder_name = f"{prefix}_{timestamp}" if prefix else timestamp
+        out_dir = Path(self._output_dir) / folder_name
         out_dir.mkdir(parents=True, exist_ok=True)
+        self._record_out_dir = out_dir
+        self._stats_log = []
+
+        file_prefix = f"{prefix}_" if prefix else ""
 
         # Start recording on active cameras
         if self._cam0 is not None:
-            self._cam0.start_recording(str(out_dir / f"cam0{ext}"), duration_secs)
+            self._cam0.start_recording(str(out_dir / f"{file_prefix}cam0{ext}"), duration_secs)
         if self._cam1 is not None:
-            self._cam1.start_recording(str(out_dir / f"cam1{ext}"), duration_secs)
+            self._cam1.start_recording(str(out_dir / f"{file_prefix}cam1{ext}"), duration_secs)
 
         self._recording = True
         self._record_start = time.monotonic()
@@ -488,8 +536,13 @@ class MainWindow(QMainWindow):
             self._cam0.stop_recording()
         if self._cam1 is not None:
             self._cam1.stop_recording()
+
+        # Write stats log
+        self._write_stats_log()
+
         self._recording = False
         self._record_start = None
+        self._record_out_dir = None
         self._cam_stats.clear()
         self._status_stats.setText("")
         self._record_btn.setText("Start Recording")
@@ -505,6 +558,7 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(True)
 
     def _set_controls_enabled(self, enabled: bool):
+        self._prefix_input.setEnabled(enabled)
         self._duration_input.setEnabled(enabled)
         self._res_combo.setEnabled(enabled)
         self._fps_combo.setEnabled(enabled)
@@ -587,9 +641,68 @@ class MainWindow(QMainWindow):
             self._output_dir = path
             self._output_label.setText(path)
 
+    def _open_output_dir(self):
+        path = self._output_dir
+        Path(path).mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    # ── Stats Log ────────────────────────────────────────────────────
+
+    def _write_stats_log(self):
+        if not self._record_out_dir or not self._stats_log:
+            return
+        log_path = self._record_out_dir / "capture_stats.jsonl"
+        try:
+            with open(log_path, "w") as f:
+                # First line: session metadata
+                meta = {
+                    "type": "session",
+                    "timestamp": datetime.now().isoformat(),
+                    "duration_input": self._duration_input.text(),
+                    "resolution": self._res_combo.currentText(),
+                    "fps": self._fps_combo.currentData(),
+                    "codec": self._codec_combo.currentText(),
+                    "output_dir": str(self._record_out_dir),
+                    "pump_auto": self._pump_auto_check.isChecked(),
+                    "pump_on_time": self._pump_on_input.text(),
+                    "pump_off_time": self._pump_off_input.text(),
+                }
+                f.write(json.dumps(meta) + "\n")
+                # One line per stats sample
+                for sample in self._stats_log:
+                    f.write(json.dumps(sample) + "\n")
+            log.info("Stats log written to %s (%d samples)", log_path, len(self._stats_log))
+        except Exception as e:
+            log.error("Failed to write stats log: %s", e)
+
+    # ── Config ───────────────────────────────────────────────────────
+
+    def _save_current_config(self):
+        self._cfg.update({
+            "output_dir": self._output_dir,
+            "video_prefix": self._prefix_input.text().strip(),
+            "duration": self._duration_input.text(),
+            "resolution": self._res_combo.currentText(),
+            "fps": self._fps_combo.currentData(),
+            "codec": self._codec_combo.currentText(),
+            "cam0_device": self._cam0_combo.currentData(),
+            "cam1_device": self._cam1_combo.currentData(),
+            "pump_auto": self._pump_auto_check.isChecked(),
+            "pump_on_time": self._pump_on_input.text(),
+            "pump_off_time": self._pump_off_input.text(),
+            "pump_port": self._port_combo.currentText(),
+        })
+        save_config(self._cfg)
+
     # ── Cleanup ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        self._save_current_config()
         for cam in (self._cam0, self._cam1):
             if cam is not None:
                 cam.stop()
