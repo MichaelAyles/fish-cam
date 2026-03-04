@@ -1,0 +1,4 @@
+PyQt6>=6.6
+opencv-python>=4.9
+pyserial>=3.5
+numpy>=1.24
