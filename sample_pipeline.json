@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "shared": true,
+  "pipelines": {
+    "shared": [
+      {
+        "name": "ConvertColor",
+        "enabled": true,
+        "params": {"conversion": "BGR2GRAY"}
+      },
+      {
+        "name": "GaussianBlur",
+        "enabled": true,
+        "params": {"ksize": 5, "sigma": 0.0}
+      },
+      {
+        "name": "BackgroundSubtractor",
+        "enabled": true,
+        "params": {
+          "method": "MOG2",
+          "history": 500,
+          "threshold": 16.0,
+          "detect_shadows": true,
+          "learning_rate": -1.0
+        }
+      },
+      {
+        "name": "Threshold",
+        "enabled": true,
+        "params": {"thresh": 128, "maxval": 255, "type": "BINARY"}
+      },
+      {
+        "name": "Dilate",
+        "enabled": true,
+        "params": {"ksize": 3, "iterations": 2}
+      }
+    ],
+    "top": [],
+    "front": []
+  }
+}

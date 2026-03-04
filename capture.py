@@ -100,15 +100,6 @@ def enumerate_cameras(max_index: int = 10) -> list[tuple[int, str]]:
     return available
 
 
-def process_frame(frame: np.ndarray) -> np.ndarray:
-    """Process a frame through the filter pipeline.
-
-    Currently a no-op passthrough. Future processing steps will be added here,
-    e.g. background subtraction, thresholding, contour detection, tracking.
-    """
-    return frame
-
-
 def probe_resolutions(cap: cv2.VideoCapture) -> list[tuple[int, int]]:
     """Try setting common resolutions and return the ones that stick."""
     supported = []
@@ -125,7 +116,8 @@ def probe_resolutions(cap: cv2.VideoCapture) -> list[tuple[int, int]]:
 class CameraThread(QThread):
     """Captures frames from a USB camera in a background thread."""
 
-    frame_ready = pyqtSignal(int, np.ndarray)  # camera_index, frame
+    frame_ready = pyqtSignal(int, np.ndarray)  # camera_index, filtered frame
+    raw_frame_ready = pyqtSignal(int, np.ndarray)  # camera_index, raw frame
     error = pyqtSignal(int, str)  # camera_index, message
     recording_finished = pyqtSignal(int)  # camera_index
     stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
@@ -155,6 +147,10 @@ class CameraThread(QThread):
         self._last_stats_time = 0.0
         self._last_file_size = 0
         self._write_latencies: collections.deque = collections.deque()
+        self._pipeline = None  # Optional FilterPipeline
+        self._record_raw = False
+        self._raw_writer: Optional[cv2.VideoWriter] = None
+        self._raw_output_path: Optional[str] = None
 
     def set_resolution(self, width: int, height: int):
         """Set the target capture resolution."""
@@ -168,6 +164,15 @@ class CameraThread(QThread):
     def set_codec(self, codec: str):
         """Set the video codec name (must be a key in CODECS)."""
         self._codec = codec
+
+    def set_pipeline(self, pipeline):
+        """Attach a FilterPipeline to apply to each frame."""
+        self._pipeline = pipeline
+
+    def set_record_raw(self, enabled: bool, raw_path: Optional[str] = None):
+        """Enable recording of raw (unfiltered) frames alongside filtered output."""
+        self._record_raw = enabled
+        self._raw_output_path = raw_path
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
         """Begin recording frames to disk.
@@ -230,7 +235,7 @@ class CameraThread(QThread):
         self.stats_updated.emit(self.camera_index, fps, bitrate, avg_latency_ms)
 
     def run(self):
-        """Main capture loop: read frames, write to disk if recording, pace to target FPS."""
+        """Main capture loop: read frames, apply pipeline, write to disk, pace to target FPS."""
         self._running = True
         cap = cv2.VideoCapture(self.device_id)
 
@@ -275,13 +280,15 @@ class CameraThread(QThread):
                 continue
             consecutive_failures = 0
 
-            frame = process_frame(frame)
-            self.frame_ready.emit(self.camera_index, frame)
+            # Emit raw frame, then apply pipeline for filtered frame
+            self.raw_frame_ready.emit(self.camera_index, frame)
+            filtered = self._pipeline.apply(frame) if self._pipeline else frame
+            self.frame_ready.emit(self.camera_index, filtered)
 
             if self._recording:
                 if self._writer is None:
                     fourcc = CODECS.get(self._codec, CODECS["FFV1"])
-                    h, w = frame.shape[:2]
+                    h, w = filtered.shape[:2]
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
@@ -291,9 +298,17 @@ class CameraThread(QThread):
                         self._writer = None
                         continue
                     self._record_start_time = time.monotonic()
+                    # Open raw writer if needed
+                    if self._record_raw and self._raw_output_path:
+                        rh, rw = frame.shape[:2]
+                        self._raw_writer = cv2.VideoWriter(
+                            self._raw_output_path, fourcc, self._target_fps, (rw, rh)
+                        )
 
                 t0 = time.monotonic()
-                self._writer.write(frame)
+                self._writer.write(filtered)
+                if self._raw_writer is not None:
+                    self._raw_writer.write(frame)
                 write_ms = (time.monotonic() - t0) * 1000.0
                 self._write_latencies.append(write_ms)
                 # Keep only last ~1 second of latency samples
@@ -313,11 +328,17 @@ class CameraThread(QThread):
                     self._recording = False
                     self._writer.release()
                     self._writer = None
+                    if self._raw_writer is not None:
+                        self._raw_writer.release()
+                        self._raw_writer = None
                     self.recording_finished.emit(self.camera_index)
             else:
                 if self._writer is not None:
                     self._writer.release()
                     self._writer = None
+                if self._raw_writer is not None:
+                    self._raw_writer.release()
+                    self._raw_writer = None
 
             # Pace the loop to approximate target FPS, accounting for work done
             next_frame_time += frame_interval
@@ -330,6 +351,8 @@ class CameraThread(QThread):
 
         if self._writer is not None:
             self._writer.release()
+        if self._raw_writer is not None:
+            self._raw_writer.release()
         cap.release()
         log.info("Camera %d stopped", self.camera_index)
 
@@ -338,6 +361,7 @@ class DummyCameraThread(QThread):
     """Generates synthetic test pattern frames for development without hardware."""
 
     frame_ready = pyqtSignal(int, np.ndarray)
+    raw_frame_ready = pyqtSignal(int, np.ndarray)
     error = pyqtSignal(int, str)
     recording_finished = pyqtSignal(int)
     stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
@@ -368,6 +392,10 @@ class DummyCameraThread(QThread):
         self._last_file_size = 0
         self._write_latencies: collections.deque = collections.deque()
         self._tick = 0
+        self._pipeline = None
+        self._record_raw = False
+        self._raw_writer: Optional[cv2.VideoWriter] = None
+        self._raw_output_path: Optional[str] = None
 
     def set_resolution(self, width: int, height: int):
         """Set the target frame dimensions."""
@@ -381,6 +409,15 @@ class DummyCameraThread(QThread):
     def set_codec(self, codec: str):
         """Set the video codec name."""
         self._codec = codec
+
+    def set_pipeline(self, pipeline):
+        """Attach a FilterPipeline to apply to each frame."""
+        self._pipeline = pipeline
+
+    def set_record_raw(self, enabled: bool, raw_path: Optional[str] = None):
+        """Enable recording of raw (unfiltered) frames alongside filtered output."""
+        self._record_raw = enabled
+        self._raw_output_path = raw_path
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
         """Begin recording generated frames to disk."""
@@ -462,7 +499,7 @@ class DummyCameraThread(QThread):
         return frame
 
     def run(self):
-        """Main loop: generate synthetic frames, optionally write to disk, pace to target FPS."""
+        """Main loop: generate synthetic frames, apply pipeline, write to disk, pace to target FPS."""
         self._running = True
         log.info("Dummy camera %d started: %dx%d", self.camera_index, self._target_width, self._target_height)
 
@@ -470,20 +507,28 @@ class DummyCameraThread(QThread):
         next_frame_time = time.monotonic()
         while self._running:
             frame = self._generate_frame()
-            frame = process_frame(frame)
-            self.frame_ready.emit(self.camera_index, frame)
+            self.raw_frame_ready.emit(self.camera_index, frame)
+            filtered = self._pipeline.apply(frame) if self._pipeline else frame
+            self.frame_ready.emit(self.camera_index, filtered)
 
             if self._recording:
                 if self._writer is None:
                     fourcc = CODECS.get(self._codec, CODECS["FFV1"])
-                    h, w = frame.shape[:2]
+                    h, w = filtered.shape[:2]
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
                     self._record_start_time = time.monotonic()
+                    if self._record_raw and self._raw_output_path:
+                        rh, rw = frame.shape[:2]
+                        self._raw_writer = cv2.VideoWriter(
+                            self._raw_output_path, fourcc, self._target_fps, (rw, rh)
+                        )
 
                 t0 = time.monotonic()
-                self._writer.write(frame)
+                self._writer.write(filtered)
+                if self._raw_writer is not None:
+                    self._raw_writer.write(frame)
                 write_ms = (time.monotonic() - t0) * 1000.0
                 self._write_latencies.append(write_ms)
                 while len(self._write_latencies) > self._target_fps:
@@ -501,11 +546,17 @@ class DummyCameraThread(QThread):
                     self._recording = False
                     self._writer.release()
                     self._writer = None
+                    if self._raw_writer is not None:
+                        self._raw_writer.release()
+                        self._raw_writer = None
                     self.recording_finished.emit(self.camera_index)
             else:
                 if self._writer is not None:
                     self._writer.release()
                     self._writer = None
+                if self._raw_writer is not None:
+                    self._raw_writer.release()
+                    self._raw_writer = None
 
             next_frame_time += frame_interval
             sleep_time = next_frame_time - time.monotonic()
@@ -516,4 +567,6 @@ class DummyCameraThread(QThread):
 
         if self._writer is not None:
             self._writer.release()
+        if self._raw_writer is not None:
+            self._raw_writer.release()
         log.info("Dummy camera %d stopped", self.camera_index)

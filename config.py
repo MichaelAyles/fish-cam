@@ -26,6 +26,8 @@ DEFAULTS = {
     "pump_on_time": "02:00",
     "pump_off_time": "04:00",
     "video_prefix": "",
+    "pipeline": None,
+    "record_raw": False,
 }
 
 

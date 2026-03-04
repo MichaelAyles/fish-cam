@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -47,6 +48,8 @@ from capture import (
     enumerate_cameras,
 )
 from config import load_config, save_config
+from pipeline import PipelineManager
+from pipeline_editor import PipelineEditorDock
 from relay import MockRelayController, RelayController, scan_ports
 
 log = logging.getLogger(__name__)
@@ -56,10 +59,14 @@ _CAM_FILE_TAGS = {0: "top", 1: "front"}
 
 
 def frame_to_pixmap(frame: np.ndarray, target_width: int = 480, target_height: int = 360) -> QPixmap:
-    """Convert an OpenCV BGR frame to a QPixmap that fits within target bounds, preserving aspect ratio."""
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    h, w = rgb.shape[:2]
-    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+    """Convert an OpenCV BGR or grayscale frame to a QPixmap, preserving aspect ratio."""
+    if frame.ndim == 2:
+        h, w = frame.shape
+        qimg = QImage(frame.data, w, h, w, QImage.Format.Format_Grayscale8)
+    else:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg).scaled(
         target_width, target_height,
         Qt.AspectRatioMode.KeepAspectRatio,
@@ -94,7 +101,19 @@ class MainWindow(QMainWindow):
         self._pump_triggered_on = False
         self._pump_triggered_off = False
         self._output_dir = self._cfg.get("output_dir", str(Path.home() / "FishCapture"))
+        self._latest_raw_frames: dict[int, np.ndarray] = {}
+        self._latest_filtered_frames: dict[int, np.ndarray] = {}
+        # Keep old name for backward compat in _on_tick
         self._latest_frames: dict[int, np.ndarray] = {}
+
+        # Pipeline manager
+        self._pipeline_manager = PipelineManager()
+        saved_pipeline = self._cfg.get("pipeline")
+        if saved_pipeline:
+            try:
+                self._pipeline_manager.load_dict(saved_pipeline)
+            except Exception as e:
+                log.warning("Failed to restore pipeline: %s", e)
 
         # Events CSV sidecar
         self._event_csv_file = None
@@ -136,18 +155,28 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        # Left: camera previews stacked vertically
-        preview_layout = QVBoxLayout()
-        self._preview0 = QLabel("Top View: waiting...")
-        self._preview1 = QLabel("Front View: waiting...")
-        for lbl in (self._preview0, self._preview1):
+        # Left: 2x2 camera preview grid (raw top row, filtered bottom row)
+        preview_grid = QGridLayout()
+        preview_grid.addWidget(QLabel("Top Raw"), 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(QLabel("Front Raw"), 0, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        self._preview_raw0 = QLabel("Top Raw: waiting...")
+        self._preview_raw1 = QLabel("Front Raw: waiting...")
+        self._preview_filt0 = QLabel("Top Filtered: waiting...")
+        self._preview_filt1 = QLabel("Front Filtered: waiting...")
+        all_previews = [self._preview_raw0, self._preview_raw1,
+                        self._preview_filt0, self._preview_filt1]
+        for lbl in all_previews:
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setMinimumSize(480, 360)
+            lbl.setMinimumSize(320, 240)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             lbl.setStyleSheet("background-color: #222; color: #aaa;")
-        preview_layout.addWidget(self._preview0)
-        preview_layout.addWidget(self._preview1)
-        root.addLayout(preview_layout, stretch=3)
+        preview_grid.addWidget(self._preview_raw0, 1, 0)
+        preview_grid.addWidget(self._preview_raw1, 1, 1)
+        preview_grid.addWidget(QLabel("Top Filtered"), 2, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(QLabel("Front Filtered"), 2, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(self._preview_filt0, 3, 0)
+        preview_grid.addWidget(self._preview_filt1, 3, 1)
+        root.addLayout(preview_grid, stretch=3)
 
         # Right: controls panel
         controls = QVBoxLayout()
@@ -155,9 +184,13 @@ class MainWindow(QMainWindow):
         controls.addWidget(self._build_capture_group())
         controls.addWidget(self._build_pump_group())
         controls.addWidget(self._build_output_group())
-        controls.addWidget(self._build_pipeline_group())
         controls.addStretch()
         root.addLayout(controls, stretch=1)
+
+        # Pipeline editor dock (right side)
+        self._pipeline_dock = PipelineEditorDock(self._pipeline_manager, self)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._pipeline_dock)
+        self._pipeline_dock.editor.pipeline_changed.connect(self._on_pipeline_changed)
 
         # Status bar
         self._status_bar = QStatusBar()
@@ -236,12 +269,15 @@ class MainWindow(QMainWindow):
         if device_id is None or device_id < 0:
             return
 
+        tag = _CAM_FILE_TAGS.get(camera_index, "top")
         CamClass = DummyCameraThread if self.dummy else CameraThread
         cam = CamClass(camera_index=camera_index, device_id=device_id)
-        cam.frame_ready.connect(self._on_frame)
+        cam.raw_frame_ready.connect(self._on_raw_frame)
+        cam.frame_ready.connect(self._on_filtered_frame)
         cam.error.connect(self._on_camera_error)
         cam.recording_finished.connect(self._on_recording_finished)
         cam.stats_updated.connect(self._on_stats_updated)
+        cam.set_pipeline(self._pipeline_manager.get_pipeline(tag))
 
         if camera_index == 0:
             self._cam0 = cam
@@ -260,9 +296,13 @@ class MainWindow(QMainWindow):
         else:
             self._cam1 = None
         self._latest_frames.pop(camera_index, None)
-        label = self._preview0 if camera_index == 0 else self._preview1
-        label.clear()
-        label.setText(f"{_CAM_LABELS.get(camera_index, f'Camera {camera_index}')}: no device")
+        self._latest_raw_frames.pop(camera_index, None)
+        self._latest_filtered_frames.pop(camera_index, None)
+        raw_lbl = self._preview_raw0 if camera_index == 0 else self._preview_raw1
+        filt_lbl = self._preview_filt0 if camera_index == 0 else self._preview_filt1
+        for lbl in (raw_lbl, filt_lbl):
+            lbl.clear()
+            lbl.setText(f"{_CAM_LABELS.get(camera_index, f'Camera {camera_index}')}: no device")
 
     def _on_cam_device_changed(self, camera_index: int):
         """Handle camera device combo box change."""
@@ -417,18 +457,28 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
         return group
 
-    def _build_pipeline_group(self) -> QGroupBox:
-        """Build the processing pipeline placeholder group."""
-        group = QGroupBox("Processing Pipeline")
-        layout = QVBoxLayout(group)
-        layout.addWidget(QLabel("Coming soon — filter pipeline controls will appear here."))
-        return group
-
     # ── Slots ────────────────────────────────────────────────────────
 
-    def _on_frame(self, camera_index: int, frame: np.ndarray):
-        """Store the latest frame for preview rendering."""
+    def _on_raw_frame(self, camera_index: int, frame: np.ndarray):
+        """Store the latest raw (unfiltered) frame."""
+        self._latest_raw_frames[camera_index] = frame
+
+    def _on_filtered_frame(self, camera_index: int, frame: np.ndarray):
+        """Store the latest filtered frame for preview rendering."""
+        self._latest_filtered_frames[camera_index] = frame
         self._latest_frames[camera_index] = frame
+
+    def _on_pipeline_changed(self):
+        """Handle pipeline editor changes — warn if recording."""
+        if self._recording:
+            self._pipeline_dock.editor.show_warning(
+                "Pipeline changed during recording — filtered output will reflect the new settings."
+            )
+        # Re-inject pipelines into camera threads
+        for cam_idx, cam in [(0, self._cam0), (1, self._cam1)]:
+            if cam is not None:
+                tag = _CAM_FILE_TAGS.get(cam_idx, "top")
+                cam.set_pipeline(self._pipeline_manager.get_pipeline(tag))
 
     def _on_stats_updated(self, camera_index: int, fps: float, bitrate: float, latency_ms: float):
         """Update the status bar with per-camera recording statistics."""
@@ -467,11 +517,17 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self):
         """Called at ~15fps for preview updates, elapsed time, pump countdown, and auto-trigger."""
-        # Update previews
-        for idx, label in [(0, self._preview0), (1, self._preview1)]:
-            if idx in self._latest_frames:
-                pm = frame_to_pixmap(self._latest_frames[idx], label.width(), label.height())
-                label.setPixmap(pm)
+        # Update previews (raw + filtered for each camera)
+        for idx, raw_lbl, filt_lbl in [
+            (0, self._preview_raw0, self._preview_filt0),
+            (1, self._preview_raw1, self._preview_filt1),
+        ]:
+            if idx in self._latest_raw_frames:
+                pm = frame_to_pixmap(self._latest_raw_frames[idx], raw_lbl.width(), raw_lbl.height())
+                raw_lbl.setPixmap(pm)
+            if idx in self._latest_filtered_frames:
+                pm = frame_to_pixmap(self._latest_filtered_frames[idx], filt_lbl.width(), filt_lbl.height())
+                filt_lbl.setPixmap(pm)
 
         # Update elapsed time
         if self._recording and self._record_start:
@@ -597,11 +653,24 @@ class MainWindow(QMainWindow):
         # Open events CSV
         self._open_event_csv(out_dir, file_prefix)
 
+        # Save pipeline sidecar JSON
+        try:
+            self._pipeline_manager.save_json(str(out_dir / f"{file_prefix}pipeline.json"))
+        except Exception as e:
+            log.error("Failed to save pipeline sidecar: %s", e)
+
+        # Set up raw recording if enabled
+        record_raw = self._pipeline_dock.editor.record_raw
+
         # Start recording on active cameras
-        if self._cam0 is not None:
-            self._cam0.start_recording(str(out_dir / f"{file_prefix}top{ext}"), duration_secs)
-        if self._cam1 is not None:
-            self._cam1.start_recording(str(out_dir / f"{file_prefix}front{ext}"), duration_secs)
+        for cam, tag in [(self._cam0, "top"), (self._cam1, "front")]:
+            if cam is not None:
+                if record_raw:
+                    raw_path = str(out_dir / f"{file_prefix}{tag}_raw{ext}")
+                    cam.set_record_raw(True, raw_path)
+                else:
+                    cam.set_record_raw(False)
+                cam.start_recording(str(out_dir / f"{file_prefix}{tag}{ext}"), duration_secs)
 
         self._recording = True
         self._record_start = time.monotonic()
@@ -826,6 +895,7 @@ class MainWindow(QMainWindow):
                     "pump_auto": self._pump_auto_check.isChecked(),
                     "pump_on_time": self._pump_on_input.text(),
                     "pump_off_time": self._pump_off_input.text(),
+                    "pipeline": self._pipeline_manager.to_dict(),
                 }
                 f.write(json.dumps(meta) + "\n")
                 # One line per stats sample
@@ -852,6 +922,8 @@ class MainWindow(QMainWindow):
             "pump_on_time": self._pump_on_input.text(),
             "pump_off_time": self._pump_off_input.text(),
             "pump_port": self._port_combo.currentText(),
+            "pipeline": self._pipeline_manager.to_dict(),
+            "record_raw": self._pipeline_dock.editor.record_raw,
         })
         save_config(self._cfg)
 

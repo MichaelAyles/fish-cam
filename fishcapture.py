@@ -64,6 +64,66 @@ QStatusBar {
 QLabel {
     background-color: transparent;
 }
+QDockWidget {
+    titlebar-close-icon: none;
+    font-weight: bold;
+}
+QDockWidget::title {
+    background-color: #313335;
+    padding: 6px;
+}
+QSlider::groove:horizontal {
+    border: 1px solid #555;
+    height: 6px;
+    background: #3c3f41;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #5a8fbf;
+    border: 1px solid #4a6d8c;
+    width: 14px;
+    margin: -4px 0;
+    border-radius: 7px;
+}
+QDoubleSpinBox {
+    background-color: #3c3f41;
+    border: 1px solid #555;
+    border-radius: 3px;
+    padding: 3px 6px;
+    color: #ddd;
+}
+QTabWidget::pane {
+    border: 1px solid #555;
+    background-color: #2b2b2b;
+}
+QTabBar::tab {
+    background-color: #313335;
+    color: #aaa;
+    padding: 6px 12px;
+    border: 1px solid #555;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}
+QTabBar::tab:selected {
+    background-color: #2b2b2b;
+    color: #ddd;
+}
+QTabBar::tab:hover {
+    background-color: #3c3f41;
+}
+QListWidget {
+    background-color: #2b2b2b;
+    border: 1px solid #555;
+    border-radius: 3px;
+}
+QListWidget::item {
+    border-bottom: 1px solid #3c3f41;
+    padding: 2px;
+}
+QListWidget::item:selected {
+    background-color: #365880;
+}
 """
 
 
