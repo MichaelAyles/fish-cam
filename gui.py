@@ -49,7 +49,7 @@ from capture import (
 )
 from config import load_config, save_config
 from pipeline import PipelineManager
-from pipeline_editor import PipelineEditorDock
+from pipeline_editor import PipelineEditorDialog
 from relay import MockRelayController, RelayController, scan_ports
 
 log = logging.getLogger(__name__)
@@ -186,13 +186,15 @@ class MainWindow(QMainWindow):
         controls.addWidget(self._build_capture_group())
         controls.addWidget(self._build_pump_group())
         controls.addWidget(self._build_output_group())
+        self._pipeline_btn = QPushButton("Edit Pipeline...")
+        self._pipeline_btn.clicked.connect(self._show_pipeline_editor)
+        controls.addWidget(self._pipeline_btn)
         controls.addStretch()
         root.addLayout(controls, stretch=1)
 
-        # Pipeline editor dock (right side)
-        self._pipeline_dock = PipelineEditorDock(self._pipeline_manager, self)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._pipeline_dock)
-        self._pipeline_dock.editor.pipeline_changed.connect(self._on_pipeline_changed)
+        # Pipeline editor popup (non-modal dialog)
+        self._pipeline_dialog = PipelineEditorDialog(self._pipeline_manager, self)
+        self._pipeline_dialog.editor.pipeline_changed.connect(self._on_pipeline_changed)
 
         # Status bar
         self._status_bar = QStatusBar()
@@ -470,10 +472,16 @@ class MainWindow(QMainWindow):
         self._latest_filtered_frames[camera_index] = frame
         self._latest_frames[camera_index] = frame
 
+    def _show_pipeline_editor(self):
+        """Show the pipeline editor popup window."""
+        self._pipeline_dialog.show()
+        self._pipeline_dialog.raise_()
+        self._pipeline_dialog.activateWindow()
+
     def _on_pipeline_changed(self):
         """Handle pipeline editor changes — warn if recording."""
         if self._recording:
-            self._pipeline_dock.editor.show_warning(
+            self._pipeline_dialog.editor.show_warning(
                 "Pipeline changed during recording — filtered output will reflect the new settings."
             )
         # Re-inject pipelines into camera threads
@@ -662,7 +670,7 @@ class MainWindow(QMainWindow):
             log.error("Failed to save pipeline sidecar: %s", e)
 
         # Set up raw recording if enabled
-        record_raw = self._pipeline_dock.editor.record_raw
+        record_raw = self._pipeline_dialog.editor.record_raw
 
         # Start recording on active cameras
         for cam, tag in [(self._cam0, "top"), (self._cam1, "front")]:
@@ -925,7 +933,7 @@ class MainWindow(QMainWindow):
             "pump_off_time": self._pump_off_input.text(),
             "pump_port": self._port_combo.currentText(),
             "pipeline": self._pipeline_manager.to_dict(),
-            "record_raw": self._pipeline_dock.editor.record_raw,
+            "record_raw": self._pipeline_dialog.editor.record_raw,
         })
         save_config(self._cfg)
 

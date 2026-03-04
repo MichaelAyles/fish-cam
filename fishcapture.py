@@ -64,14 +64,6 @@ QStatusBar {
 QLabel {
     background-color: transparent;
 }
-QDockWidget {
-    titlebar-close-icon: none;
-    font-weight: bold;
-}
-QDockWidget::title {
-    background-color: #313335;
-    padding: 6px;
-}
 QSlider::groove:horizontal {
     border: 1px solid #555;
     height: 6px;

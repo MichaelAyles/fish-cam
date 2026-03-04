@@ -12,7 +12,7 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QBrush
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDockWidget,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -512,16 +512,17 @@ class PipelineEditorWidget(QWidget):
         self._front_list.refresh()
 
 
-# ── Dock widget ─────────────────────────────────────────────────────
+# ── Popup dialog ────────────────────────────────────────────────────
 
-class PipelineEditorDock(QDockWidget):
-    """Collapsible right-side dock wrapping the pipeline editor."""
+class PipelineEditorDialog(QDialog):
+    """Non-modal popup window for editing the filter pipeline."""
 
     def __init__(self, pipeline_manager: PipelineManager, parent=None):
-        super().__init__("Filter Pipeline", parent)
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.setMinimumWidth(300)
+        super().__init__(parent)
+        self.setWindowTitle("Filter Pipeline")
+        self.setMinimumSize(400, 500)
+        self.resize(420, 600)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.editor = PipelineEditorWidget(pipeline_manager)
-        self.setWidget(self.editor)
+        layout.addWidget(self.editor)
