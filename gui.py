@@ -669,18 +669,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.error("Failed to save pipeline sidecar: %s", e)
 
-        # Set up raw recording if enabled
-        record_raw = self._pipeline_dialog.editor.record_raw
-
-        # Start recording on active cameras
-        for cam, tag in [(self._cam0, "top"), (self._cam1, "front")]:
+        # Start recording on active cameras (always record both raw and filtered)
+        for cam, tag in [(self._cam0, "top"), (self._cam1, "side")]:
             if cam is not None:
-                if record_raw:
-                    raw_path = str(out_dir / f"{file_prefix}{tag}_raw{ext}")
-                    cam.set_record_raw(True, raw_path)
-                else:
-                    cam.set_record_raw(False)
-                cam.start_recording(str(out_dir / f"{file_prefix}{tag}{ext}"), duration_secs)
+                raw_path = str(out_dir / f"{file_prefix}{tag}_raw{ext}")
+                cam.set_record_raw(True, raw_path)
+                cam.start_recording(str(out_dir / f"{file_prefix}{tag}_filt{ext}"), duration_secs)
 
         self._recording = True
         self._record_start = time.monotonic()
@@ -933,7 +927,6 @@ class MainWindow(QMainWindow):
             "pump_off_time": self._pump_off_input.text(),
             "pump_port": self._port_combo.currentText(),
             "pipeline": self._pipeline_manager.to_dict(),
-            "record_raw": self._pipeline_dialog.editor.record_raw,
         })
         save_config(self._cfg)
 

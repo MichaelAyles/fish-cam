@@ -417,10 +417,6 @@ class PipelineEditorWidget(QWidget):
         self._separate_cb.stateChanged.connect(self._on_mode_changed)
         layout.addWidget(self._separate_cb)
 
-        self._record_raw_cb = QCheckBox("Record raw alongside filtered")
-        self._record_raw_cb.setChecked(False)
-        layout.addWidget(self._record_raw_cb)
-
         # Warning label (shown during recording)
         self._warning_label = QLabel("")
         self._warning_label.setStyleSheet("color: #f39c12; font-size: 11px;")
@@ -456,10 +452,6 @@ class PipelineEditorWidget(QWidget):
         layout.addStretch()
 
         self._update_mode_visibility()
-
-    @property
-    def record_raw(self) -> bool:
-        return self._record_raw_cb.isChecked()
 
     def _on_mode_changed(self):
         self._manager.shared = not self._separate_cb.isChecked()
