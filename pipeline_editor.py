@@ -440,7 +440,7 @@ class PipelineEditorWidget(QWidget):
         self._front_list = FilterListWidget(pipeline_manager._per_camera["front"])
         self._front_list.pipeline_changed.connect(self._on_pipeline_changed)
         self._tab_widget.addTab(self._top_list, "Top View")
-        self._tab_widget.addTab(self._front_list, "Front View")
+        self._tab_widget.addTab(self._front_list, "Side View")
         layout.addWidget(self._tab_widget)
 
         # Save/Load buttons

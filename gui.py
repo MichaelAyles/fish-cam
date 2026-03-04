@@ -54,7 +54,7 @@ from relay import MockRelayController, RelayController, scan_ports
 
 log = logging.getLogger(__name__)
 
-_CAM_LABELS = {0: "Top View", 1: "Front View"}
+_CAM_LABELS = {0: "Top View", 1: "Side View"}
 _CAM_FILE_TAGS = {0: "top", 1: "front"}
 
 
@@ -155,14 +155,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        # Left: 2x2 camera preview grid (raw top row, filtered bottom row)
+        # Left: 2x2 camera preview grid
+        # Row 0: Top Raw (left) | Top Filtered (right)
+        # Row 1: Side Raw (left) | Side Filtered (right)
         preview_grid = QGridLayout()
         preview_grid.addWidget(QLabel("Top Raw"), 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
-        preview_grid.addWidget(QLabel("Front Raw"), 0, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(QLabel("Top Filtered"), 0, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(QLabel("Side Raw"), 2, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        preview_grid.addWidget(QLabel("Side Filtered"), 2, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
         self._preview_raw0 = QLabel("Top Raw: waiting...")
-        self._preview_raw1 = QLabel("Front Raw: waiting...")
+        self._preview_raw1 = QLabel("Side Raw: waiting...")
         self._preview_filt0 = QLabel("Top Filtered: waiting...")
-        self._preview_filt1 = QLabel("Front Filtered: waiting...")
+        self._preview_filt1 = QLabel("Side Filtered: waiting...")
         all_previews = [self._preview_raw0, self._preview_raw1,
                         self._preview_filt0, self._preview_filt1]
         for lbl in all_previews:
@@ -171,10 +175,8 @@ class MainWindow(QMainWindow):
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             lbl.setStyleSheet("background-color: #222; color: #aaa;")
         preview_grid.addWidget(self._preview_raw0, 1, 0)
-        preview_grid.addWidget(self._preview_raw1, 1, 1)
-        preview_grid.addWidget(QLabel("Top Filtered"), 2, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
-        preview_grid.addWidget(QLabel("Front Filtered"), 2, 1, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
-        preview_grid.addWidget(self._preview_filt0, 3, 0)
+        preview_grid.addWidget(self._preview_filt0, 1, 1)
+        preview_grid.addWidget(self._preview_raw1, 3, 0)
         preview_grid.addWidget(self._preview_filt1, 3, 1)
         root.addLayout(preview_grid, stretch=3)
 
@@ -226,7 +228,7 @@ class MainWindow(QMainWindow):
 
         # Camera 1 device selector
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Front View:"))
+        row1.addWidget(QLabel("Side View:"))
         self._cam1_combo = QComboBox()
         self._populate_cam_combo(self._cam1_combo, default_index=self._cfg.get("cam1_device", 1))
         self._cam1_combo.currentIndexChanged.connect(lambda: self._on_cam_device_changed(1))
