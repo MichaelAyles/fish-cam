@@ -46,8 +46,14 @@ class RelayController:
     def close(self):
         """Turn off the relay and close the serial port."""
         if self._ser and self._ser.is_open:
-            self.send_off()
-            self._ser.close()
+            try:
+                self.send_off()
+            except Exception:
+                pass
+            try:
+                self._ser.close()
+            except Exception:
+                pass
             log.info("Relay closed")
         self._ser = None
 
