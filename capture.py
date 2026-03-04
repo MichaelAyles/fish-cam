@@ -100,6 +100,13 @@ def enumerate_cameras(max_index: int = 10) -> list[tuple[int, str]]:
     return available
 
 
+def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
+    """Convert grayscale frames to BGR so VideoWriter can encode them."""
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    return frame
+
+
 def probe_resolutions(cap: cv2.VideoCapture) -> list[tuple[int, int]]:
     """Try setting common resolutions and return the ones that stick."""
     supported = []
@@ -286,9 +293,12 @@ class CameraThread(QThread):
             self.frame_ready.emit(self.camera_index, filtered)
 
             if self._recording:
+                # Ensure BGR for VideoWriter (pipeline may output grayscale)
+                filtered_bgr = _ensure_bgr(filtered)
+
                 if self._writer is None:
                     fourcc = CODECS.get(self._codec, CODECS["FFV1"])
-                    h, w = filtered.shape[:2]
+                    h, w = filtered_bgr.shape[:2]
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
@@ -306,7 +316,7 @@ class CameraThread(QThread):
                         )
 
                 t0 = time.monotonic()
-                self._writer.write(filtered)
+                self._writer.write(filtered_bgr)
                 if self._raw_writer is not None:
                     self._raw_writer.write(frame)
                 write_ms = (time.monotonic() - t0) * 1000.0
@@ -512,9 +522,11 @@ class DummyCameraThread(QThread):
             self.frame_ready.emit(self.camera_index, filtered)
 
             if self._recording:
+                filtered_bgr = _ensure_bgr(filtered)
+
                 if self._writer is None:
                     fourcc = CODECS.get(self._codec, CODECS["FFV1"])
-                    h, w = filtered.shape[:2]
+                    h, w = filtered_bgr.shape[:2]
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
@@ -526,7 +538,7 @@ class DummyCameraThread(QThread):
                         )
 
                 t0 = time.monotonic()
-                self._writer.write(filtered)
+                self._writer.write(filtered_bgr)
                 if self._raw_writer is not None:
                     self._raw_writer.write(frame)
                 write_ms = (time.monotonic() - t0) * 1000.0
