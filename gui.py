@@ -7,6 +7,7 @@ from typing import Optional, Union
 
 import cv2
 import numpy as np
+import psutil
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -38,15 +39,16 @@ from relay import MockRelayController, RelayController, scan_ports
 log = logging.getLogger(__name__)
 
 
-def frame_to_pixmap(frame: np.ndarray, target_width: int = 480) -> QPixmap:
-    """Convert an OpenCV BGR frame to a QPixmap scaled for preview."""
-    h, w = frame.shape[:2]
-    scale = target_width / w
-    new_w, new_h = target_width, int(h * scale)
-    frame = cv2.resize(frame, (new_w, new_h))
+def frame_to_pixmap(frame: np.ndarray, target_width: int = 480, target_height: int = 360) -> QPixmap:
+    """Convert an OpenCV BGR frame to a QPixmap that fits within target bounds, preserving aspect ratio."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    qimg = QImage(rgb.data, new_w, new_h, new_w * 3, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg)
+    h, w = rgb.shape[:2]
+    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimg).scaled(
+        target_width, target_height,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +60,8 @@ class MainWindow(QMainWindow):
 
         self._recording = False
         self._record_start: Optional[float] = None
+        self._cam_stats: dict[int, tuple[float, float, float]] = {}  # camera_index -> (fps, bitrate, latency_ms)
+        self._last_system_stats_time = 0.0
         self._pump_auto_enabled = False
         self._pump_on_time = 0.0  # seconds after capture start
         self._pump_off_time = 0.0
@@ -80,6 +84,10 @@ class MainWindow(QMainWindow):
         self._cam1 = None
 
         self._build_ui()
+
+        # Auto-connect relay if a usbserial port is selected
+        if not dummy and "usbserial" in self._port_combo.currentText().lower():
+            self._connect_relay()
 
         # Start cameras with initial combo selections
         self._start_camera(0)
@@ -127,9 +135,13 @@ class MainWindow(QMainWindow):
         self._status_elapsed = QLabel("00:00.0")
         self._status_pump = QLabel("Pump: OFF")
         self._status_disk = QLabel("")
+        self._status_stats = QLabel("")
+        self._status_system = QLabel("")
         self._status_bar.addWidget(self._status_recording)
         self._status_bar.addWidget(self._status_elapsed)
+        self._status_bar.addWidget(self._status_stats)
         self._status_bar.addWidget(self._status_pump)
+        self._status_bar.addPermanentWidget(self._status_system)
         self._status_bar.addPermanentWidget(self._status_disk)
 
     def _build_camera_group(self) -> QGroupBox:
@@ -192,6 +204,7 @@ class MainWindow(QMainWindow):
         cam.frame_ready.connect(self._on_frame)
         cam.error.connect(self._on_camera_error)
         cam.recording_finished.connect(self._on_recording_finished)
+        cam.stats_updated.connect(self._on_stats_updated)
 
         if camera_index == 0:
             self._cam0 = cam
@@ -308,6 +321,7 @@ class MainWindow(QMainWindow):
 
         # Auto timing
         self._pump_auto_check = QCheckBox("Auto pump during capture")
+        self._pump_auto_check.setChecked(True)
         layout.addWidget(self._pump_auto_check)
 
         auto_row = QHBoxLayout()
@@ -349,6 +363,14 @@ class MainWindow(QMainWindow):
     def _on_frame(self, camera_index: int, frame: np.ndarray):
         self._latest_frames[camera_index] = frame
 
+    def _on_stats_updated(self, camera_index: int, fps: float, bitrate: float, latency_ms: float):
+        self._cam_stats[camera_index] = (fps, bitrate, latency_ms)
+        parts = []
+        for idx in sorted(self._cam_stats):
+            f, b, lat = self._cam_stats[idx]
+            parts.append(f"Cam{idx}: {f:.1f}fps {b:.1f}Mb/s {lat:.1f}ms")
+        self._status_stats.setText(" | ".join(parts))
+
     def _on_camera_error(self, camera_index: int, message: str):
         log.warning("Camera %d error: %s", camera_index, message)
 
@@ -365,7 +387,7 @@ class MainWindow(QMainWindow):
         # Update previews
         for idx, label in [(0, self._preview0), (1, self._preview1)]:
             if idx in self._latest_frames:
-                pm = frame_to_pixmap(self._latest_frames[idx], label.width())
+                pm = frame_to_pixmap(self._latest_frames[idx], label.width(), label.height())
                 label.setPixmap(pm)
 
         # Update elapsed time
@@ -388,6 +410,14 @@ class MainWindow(QMainWindow):
 
         # Update pump indicator
         self._update_pump_indicator()
+
+        # Update system stats (~1s interval)
+        now = time.monotonic()
+        if now - self._last_system_stats_time >= 1.0:
+            self._last_system_stats_time = now
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory().percent
+            self._status_system.setText(f"CPU {cpu:.0f}% | RAM {ram:.0f}%")
 
         # Update disk space
         try:
@@ -460,6 +490,8 @@ class MainWindow(QMainWindow):
             self._cam1.stop_recording()
         self._recording = False
         self._record_start = None
+        self._cam_stats.clear()
+        self._status_stats.setText("")
         self._record_btn.setText("Start Recording")
         self._record_btn.setStyleSheet("font-weight: bold; padding: 8px;")
         self._status_recording.setText("Idle")
@@ -500,6 +532,11 @@ class MainWindow(QMainWindow):
         else:
             for port in scan_ports():
                 self._port_combo.addItem(port)
+            # Auto-select first usbserial port
+            for i in range(self._port_combo.count()):
+                if "usbserial" in self._port_combo.itemText(i).lower():
+                    self._port_combo.setCurrentIndex(i)
+                    break
 
     def _connect_relay(self):
         if self.dummy:

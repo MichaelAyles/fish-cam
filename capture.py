@@ -1,3 +1,4 @@
+import collections
 import logging
 import os
 import platform
@@ -108,6 +109,7 @@ class CameraThread(QThread):
     frame_ready = pyqtSignal(int, np.ndarray)  # camera_index, frame
     error = pyqtSignal(int, str)  # camera_index, message
     recording_finished = pyqtSignal(int)  # camera_index
+    stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
 
     def __init__(self, camera_index: int, device_id: int = 0):
         super().__init__()
@@ -121,8 +123,13 @@ class CameraThread(QThread):
         self._target_height = 480
         self._codec = "FFV1"
         self._output_path: Optional[str] = None
-        self._max_frames: Optional[int] = None
+        self._duration_seconds: Optional[float] = None
+        self._record_start_time: Optional[float] = None
         self._frame_count = 0
+        self._frame_timestamps: collections.deque = collections.deque()
+        self._last_stats_time = 0.0
+        self._last_file_size = 0
+        self._write_latencies: collections.deque = collections.deque()
 
     def set_resolution(self, width: int, height: int):
         self._target_width = width
@@ -136,8 +143,13 @@ class CameraThread(QThread):
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
         self._output_path = output_path
-        self._max_frames = int(duration_seconds * self._target_fps) if duration_seconds else None
+        self._duration_seconds = duration_seconds
+        self._record_start_time = None
         self._frame_count = 0
+        self._frame_timestamps.clear()
+        self._write_latencies.clear()
+        self._last_stats_time = 0.0
+        self._last_file_size = 0
         self._recording = True
 
     def stop_recording(self):
@@ -146,6 +158,39 @@ class CameraThread(QThread):
     def stop(self):
         self._running = False
         self._recording = False
+
+    def _emit_stats(self):
+        now = time.monotonic()
+        if now - self._last_stats_time < 1.0:
+            return
+        self._last_stats_time = now
+
+        # FPS from rolling window
+        fps = 0.0
+        if len(self._frame_timestamps) >= 2:
+            span = self._frame_timestamps[-1] - self._frame_timestamps[0]
+            if span > 0:
+                fps = (len(self._frame_timestamps) - 1) / span
+
+        # Bitrate from file size delta
+        bitrate = 0.0
+        if self._output_path:
+            try:
+                size = os.path.getsize(self._output_path)
+                if self._last_file_size > 0 and self._record_start_time:
+                    elapsed = now - self._record_start_time
+                    if elapsed > 0:
+                        bitrate = (size * 8) / elapsed / 1_000_000  # Mbps
+                self._last_file_size = size
+            except OSError:
+                pass
+
+        # Average write latency
+        avg_latency_ms = 0.0
+        if self._write_latencies:
+            avg_latency_ms = sum(self._write_latencies) / len(self._write_latencies)
+
+        self.stats_updated.emit(self.camera_index, fps, bitrate, avg_latency_ms)
 
     def run(self):
         self._running = True
@@ -168,11 +213,14 @@ class CameraThread(QThread):
         )
 
         retry_delay = 0.5
+        frame_interval = 1.0 / self._target_fps
+        next_frame_time = time.monotonic()
         while self._running:
             ret, frame = cap.read()
             if not ret:
                 self.error.emit(self.camera_index, "Frame read failed, retrying...")
                 time.sleep(retry_delay)
+                next_frame_time = time.monotonic()
                 continue
 
             frame = process_frame(frame)
@@ -190,11 +238,26 @@ class CameraThread(QThread):
                         self._recording = False
                         self._writer = None
                         continue
+                    self._record_start_time = time.monotonic()
 
+                t0 = time.monotonic()
                 self._writer.write(frame)
+                write_ms = (time.monotonic() - t0) * 1000.0
+                self._write_latencies.append(write_ms)
+                # Keep only last ~1 second of latency samples
+                while len(self._write_latencies) > self._target_fps:
+                    self._write_latencies.popleft()
                 self._frame_count += 1
+                self._frame_timestamps.append(time.monotonic())
+                # Keep only last ~1 second of timestamps
+                while len(self._frame_timestamps) > 1 and \
+                        self._frame_timestamps[-1] - self._frame_timestamps[0] > 1.5:
+                    self._frame_timestamps.popleft()
 
-                if self._max_frames and self._frame_count >= self._max_frames:
+                self._emit_stats()
+
+                if self._duration_seconds and self._record_start_time and \
+                        time.monotonic() - self._record_start_time >= self._duration_seconds:
                     self._recording = False
                     self._writer.release()
                     self._writer = None
@@ -204,8 +267,14 @@ class CameraThread(QThread):
                     self._writer.release()
                     self._writer = None
 
-            # Pace the loop to approximate target FPS
-            time.sleep(1.0 / self._target_fps)
+            # Pace the loop to approximate target FPS, accounting for work done
+            next_frame_time += frame_interval
+            sleep_time = next_frame_time - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                # Falling behind — reset to avoid burst catching up
+                next_frame_time = time.monotonic()
 
         if self._writer is not None:
             self._writer.release()
@@ -219,6 +288,7 @@ class DummyCameraThread(QThread):
     frame_ready = pyqtSignal(int, np.ndarray)
     error = pyqtSignal(int, str)
     recording_finished = pyqtSignal(int)
+    stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
 
     def __init__(self, camera_index: int, device_id: int = 0):
         super().__init__()
@@ -232,8 +302,13 @@ class DummyCameraThread(QThread):
         self._target_height = 480
         self._codec = "FFV1"
         self._output_path: Optional[str] = None
-        self._max_frames: Optional[int] = None
+        self._duration_seconds: Optional[float] = None
+        self._record_start_time: Optional[float] = None
         self._frame_count = 0
+        self._frame_timestamps: collections.deque = collections.deque()
+        self._last_stats_time = 0.0
+        self._last_file_size = 0
+        self._write_latencies: collections.deque = collections.deque()
         self._tick = 0
 
     def set_resolution(self, width: int, height: int):
@@ -248,8 +323,13 @@ class DummyCameraThread(QThread):
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
         self._output_path = output_path
-        self._max_frames = int(duration_seconds * self._target_fps) if duration_seconds else None
+        self._duration_seconds = duration_seconds
+        self._record_start_time = None
         self._frame_count = 0
+        self._frame_timestamps.clear()
+        self._write_latencies.clear()
+        self._last_stats_time = 0.0
+        self._last_file_size = 0
         self._recording = True
 
     def stop_recording(self):
@@ -258,6 +338,36 @@ class DummyCameraThread(QThread):
     def stop(self):
         self._running = False
         self._recording = False
+
+    def _emit_stats(self):
+        now = time.monotonic()
+        if now - self._last_stats_time < 1.0:
+            return
+        self._last_stats_time = now
+
+        fps = 0.0
+        if len(self._frame_timestamps) >= 2:
+            span = self._frame_timestamps[-1] - self._frame_timestamps[0]
+            if span > 0:
+                fps = (len(self._frame_timestamps) - 1) / span
+
+        bitrate = 0.0
+        if self._output_path:
+            try:
+                size = os.path.getsize(self._output_path)
+                if self._last_file_size > 0 and self._record_start_time:
+                    elapsed = now - self._record_start_time
+                    if elapsed > 0:
+                        bitrate = (size * 8) / elapsed / 1_000_000
+                self._last_file_size = size
+            except OSError:
+                pass
+
+        avg_latency_ms = 0.0
+        if self._write_latencies:
+            avg_latency_ms = sum(self._write_latencies) / len(self._write_latencies)
+
+        self.stats_updated.emit(self.camera_index, fps, bitrate, avg_latency_ms)
 
     def _generate_frame(self) -> np.ndarray:
         """Generate a synthetic test frame with colored noise and a moving bar."""
@@ -290,6 +400,8 @@ class DummyCameraThread(QThread):
         self._running = True
         log.info("Dummy camera %d started: %dx%d", self.camera_index, self._target_width, self._target_height)
 
+        frame_interval = 1.0 / self._target_fps
+        next_frame_time = time.monotonic()
         while self._running:
             frame = self._generate_frame()
             frame = process_frame(frame)
@@ -302,11 +414,24 @@ class DummyCameraThread(QThread):
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
+                    self._record_start_time = time.monotonic()
 
+                t0 = time.monotonic()
                 self._writer.write(frame)
+                write_ms = (time.monotonic() - t0) * 1000.0
+                self._write_latencies.append(write_ms)
+                while len(self._write_latencies) > self._target_fps:
+                    self._write_latencies.popleft()
                 self._frame_count += 1
+                self._frame_timestamps.append(time.monotonic())
+                while len(self._frame_timestamps) > 1 and \
+                        self._frame_timestamps[-1] - self._frame_timestamps[0] > 1.5:
+                    self._frame_timestamps.popleft()
 
-                if self._max_frames and self._frame_count >= self._max_frames:
+                self._emit_stats()
+
+                if self._duration_seconds and self._record_start_time and \
+                        time.monotonic() - self._record_start_time >= self._duration_seconds:
                     self._recording = False
                     self._writer.release()
                     self._writer = None
@@ -316,7 +441,12 @@ class DummyCameraThread(QThread):
                     self._writer.release()
                     self._writer = None
 
-            time.sleep(1.0 / self._target_fps)
+            next_frame_time += frame_interval
+            sleep_time = next_frame_time - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                next_frame_time = time.monotonic()
 
         if self._writer is not None:
             self._writer.release()
