@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/Logo.jpg" alt="fish-on logo" width="200">
+  <img src="assets/Logo.jpg" alt="fish-on logo" width="400">
 </p>
 
 # fish-on
