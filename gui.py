@@ -1,3 +1,10 @@
+"""Main GUI window for Fish Capture.
+
+Provides dual-camera preview, recording controls, serial relay pump control,
+and an events CSV sidecar log for each capture session.
+"""
+
+import csv
 import json
 import logging
 import os
@@ -23,6 +30,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStatusBar,
@@ -43,6 +51,9 @@ from relay import MockRelayController, RelayController, scan_ports
 
 log = logging.getLogger(__name__)
 
+_CAM_LABELS = {0: "Top View", 1: "Front View"}
+_CAM_FILE_TAGS = {0: "top", 1: "front"}
+
 
 def frame_to_pixmap(frame: np.ndarray, target_width: int = 480, target_height: int = 360) -> QPixmap:
     """Convert an OpenCV BGR frame to a QPixmap that fits within target bounds, preserving aspect ratio."""
@@ -57,7 +68,14 @@ def frame_to_pixmap(frame: np.ndarray, target_width: int = 480, target_height: i
 
 
 class MainWindow(QMainWindow):
+    """Primary application window with dual-camera preview and recording controls."""
+
     def __init__(self, dummy: bool = False):
+        """Initialise the main window, cameras, and relay.
+
+        Args:
+            dummy: If True, use synthetic cameras and a mock relay.
+        """
         super().__init__()
         self.dummy = dummy
         self.setWindowTitle("Fish Capture" + (" [DUMMY]" if dummy else ""))
@@ -75,8 +93,12 @@ class MainWindow(QMainWindow):
         self._pump_off_time = 0.0
         self._pump_triggered_on = False
         self._pump_triggered_off = False
-        self._output_dir = self._cfg.get("output_dir", str(Path.home() / "fish-capture"))
+        self._output_dir = self._cfg.get("output_dir", str(Path.home() / "FishCapture"))
         self._latest_frames: dict[int, np.ndarray] = {}
+
+        # Events CSV sidecar
+        self._event_csv_file = None
+        self._event_csv_writer = None
 
         # Relay
         self._relay: Union[RelayController, MockRelayController, None] = None
@@ -109,14 +131,15 @@ class MainWindow(QMainWindow):
     # ── UI Construction ──────────────────────────────────────────────
 
     def _build_ui(self):
+        """Build the main window layout with previews, controls, and status bar."""
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
         # Left: camera previews stacked vertically
         preview_layout = QVBoxLayout()
-        self._preview0 = QLabel("Camera 0: waiting...")
-        self._preview1 = QLabel("Camera 1: waiting...")
+        self._preview0 = QLabel("Top View: waiting...")
+        self._preview1 = QLabel("Front View: waiting...")
         for lbl in (self._preview0, self._preview1):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setMinimumSize(480, 360)
@@ -142,6 +165,7 @@ class MainWindow(QMainWindow):
         self._status_recording = QLabel("Idle")
         self._status_elapsed = QLabel("00:00.0")
         self._status_pump = QLabel("Pump: OFF")
+        self._status_pump_countdown = QLabel("")
         self._status_disk = QLabel("")
         self._status_stats = QLabel("")
         self._status_system = QLabel("")
@@ -149,16 +173,18 @@ class MainWindow(QMainWindow):
         self._status_bar.addWidget(self._status_elapsed)
         self._status_bar.addWidget(self._status_stats)
         self._status_bar.addWidget(self._status_pump)
+        self._status_bar.addWidget(self._status_pump_countdown)
         self._status_bar.addPermanentWidget(self._status_system)
         self._status_bar.addPermanentWidget(self._status_disk)
 
     def _build_camera_group(self) -> QGroupBox:
+        """Build the camera device selection group."""
         group = QGroupBox("Cameras")
         layout = QVBoxLayout(group)
 
         # Camera 0 device selector
         row0 = QHBoxLayout()
-        row0.addWidget(QLabel("Cam 0:"))
+        row0.addWidget(QLabel("Top View:"))
         self._cam0_combo = QComboBox()
         self._populate_cam_combo(self._cam0_combo, default_index=self._cfg.get("cam0_device", 0))
         self._cam0_combo.currentIndexChanged.connect(lambda: self._on_cam_device_changed(0))
@@ -167,7 +193,7 @@ class MainWindow(QMainWindow):
 
         # Camera 1 device selector
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Cam 1:"))
+        row1.addWidget(QLabel("Front View:"))
         self._cam1_combo = QComboBox()
         self._populate_cam_combo(self._cam1_combo, default_index=self._cfg.get("cam1_device", 1))
         self._cam1_combo.currentIndexChanged.connect(lambda: self._on_cam_device_changed(1))
@@ -182,6 +208,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _populate_cam_combo(self, combo: QComboBox, default_index: int = 0):
+        """Populate a camera combo box with available devices."""
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("None", -1)
@@ -195,6 +222,7 @@ class MainWindow(QMainWindow):
         combo.blockSignals(False)
 
     def _rescan_cameras(self):
+        """Re-enumerate available camera devices and refresh combo boxes."""
         self._available_devices = [(0, "Dummy 0"), (1, "Dummy 1")] if self.dummy else enumerate_cameras()
         old0 = self._cam0_combo.currentData()
         old1 = self._cam1_combo.currentData()
@@ -202,6 +230,7 @@ class MainWindow(QMainWindow):
         self._populate_cam_combo(self._cam1_combo, old1 if old1 is not None else 1)
 
     def _start_camera(self, camera_index: int):
+        """Start a camera thread for the given camera index."""
         combo = self._cam0_combo if camera_index == 0 else self._cam1_combo
         device_id = combo.currentData()
         if device_id is None or device_id < 0:
@@ -221,6 +250,7 @@ class MainWindow(QMainWindow):
         cam.start()
 
     def _stop_camera(self, camera_index: int):
+        """Stop a camera thread and clear its preview."""
         cam = self._cam0 if camera_index == 0 else self._cam1
         if cam is not None:
             cam.stop()
@@ -232,9 +262,10 @@ class MainWindow(QMainWindow):
         self._latest_frames.pop(camera_index, None)
         label = self._preview0 if camera_index == 0 else self._preview1
         label.clear()
-        label.setText(f"Camera {camera_index}: no device")
+        label.setText(f"{_CAM_LABELS.get(camera_index, f'Camera {camera_index}')}: no device")
 
     def _on_cam_device_changed(self, camera_index: int):
+        """Handle camera device combo box change."""
         if self._recording:
             return
         self._stop_camera(camera_index)
@@ -244,6 +275,7 @@ class MainWindow(QMainWindow):
             self._start_camera(camera_index)
 
     def _build_capture_group(self) -> QGroupBox:
+        """Build the capture settings group (prefix, duration, resolution, fps, codec)."""
         group = QGroupBox("Capture")
         layout = QVBoxLayout(group)
 
@@ -281,11 +313,11 @@ class MainWindow(QMainWindow):
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("FPS:"))
         self._fps_combo = QComboBox()
-        for fps in [15, 24, 30, 60]:
+        for fps in [15, 24, 25, 30, 60]:
             self._fps_combo.addItem(str(fps), fps)
         saved_fps = self._cfg.get("fps", 30)
         idx = self._fps_combo.findData(saved_fps)
-        self._fps_combo.setCurrentIndex(idx if idx >= 0 else 2)
+        self._fps_combo.setCurrentIndex(idx if idx >= 0 else 3)
         fps_row.addWidget(self._fps_combo)
         layout.addLayout(fps_row)
 
@@ -311,6 +343,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_pump_group(self) -> QGroupBox:
+        """Build the pump control group (serial port, auto timing, manual buttons)."""
         group = QGroupBox("Pump Control")
         layout = QVBoxLayout(group)
 
@@ -351,12 +384,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._pump_auto_check)
 
         auto_row = QHBoxLayout()
-        auto_row.addWidget(QLabel("ON at (s):"))
-        self._pump_on_input = QLineEdit(str(self._cfg.get("pump_on_time", 120)))
+        auto_row.addWidget(QLabel("ON at (mm:ss):"))
+        self._pump_on_input = QLineEdit(str(self._cfg.get("pump_on_time", "02:00")))
         self._pump_on_input.setMaximumWidth(60)
         auto_row.addWidget(self._pump_on_input)
-        auto_row.addWidget(QLabel("OFF at (s):"))
-        self._pump_off_input = QLineEdit(str(self._cfg.get("pump_off_time", 240)))
+        auto_row.addWidget(QLabel("OFF at (mm:ss):"))
+        self._pump_off_input = QLineEdit(str(self._cfg.get("pump_off_time", "04:00")))
         self._pump_off_input.setMaximumWidth(60)
         auto_row.addWidget(self._pump_off_input)
         layout.addLayout(auto_row)
@@ -368,6 +401,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_output_group(self) -> QGroupBox:
+        """Build the output directory selection group."""
         group = QGroupBox("Output")
         layout = QVBoxLayout(group)
         self._output_label = QLabel(self._output_dir)
@@ -384,6 +418,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_pipeline_group(self) -> QGroupBox:
+        """Build the processing pipeline placeholder group."""
         group = QGroupBox("Processing Pipeline")
         layout = QVBoxLayout(group)
         layout.addWidget(QLabel("Coming soon — filter pipeline controls will appear here."))
@@ -392,14 +427,17 @@ class MainWindow(QMainWindow):
     # ── Slots ────────────────────────────────────────────────────────
 
     def _on_frame(self, camera_index: int, frame: np.ndarray):
+        """Store the latest frame for preview rendering."""
         self._latest_frames[camera_index] = frame
 
     def _on_stats_updated(self, camera_index: int, fps: float, bitrate: float, latency_ms: float):
+        """Update the status bar with per-camera recording statistics."""
         self._cam_stats[camera_index] = (fps, bitrate, latency_ms)
         parts = []
         for idx in sorted(self._cam_stats):
             f, b, lat = self._cam_stats[idx]
-            parts.append(f"Cam{idx}: {f:.1f}fps {b:.1f}Mb/s {lat:.1f}ms")
+            tag = _CAM_FILE_TAGS.get(idx, f"cam{idx}")
+            parts.append(f"{tag}: {f:.1f}fps {b:.1f}Mb/s {lat:.1f}ms")
         self._status_stats.setText(" | ".join(parts))
 
         # Accumulate for stats log
@@ -414,10 +452,13 @@ class MainWindow(QMainWindow):
             })
 
     def _on_camera_error(self, camera_index: int, message: str):
-        log.warning("Camera %d error: %s", camera_index, message)
+        """Log camera errors with the human-readable camera label."""
+        cam_label = _CAM_LABELS.get(camera_index, f"Camera {camera_index}")
+        log.warning("%s error: %s", cam_label, message)
 
     def _on_recording_finished(self, camera_index: int):
-        log.info("Camera %d recording finished", camera_index)
+        """Handle a camera finishing its recording duration."""
+        log.info("%s recording finished", _CAM_LABELS.get(camera_index, f"Camera {camera_index}"))
         # If both cameras are done (or the other wasn't recording), stop
         cam0_done = self._cam0 is None or not self._cam0._recording
         cam1_done = self._cam1 is None or not self._cam1._recording
@@ -425,7 +466,7 @@ class MainWindow(QMainWindow):
             self._stop_recording()
 
     def _on_tick(self):
-        """Called at ~15fps for preview updates, elapsed time, and pump auto-trigger."""
+        """Called at ~15fps for preview updates, elapsed time, pump countdown, and auto-trigger."""
         # Update previews
         for idx, label in [(0, self._preview0), (1, self._preview1)]:
             if idx in self._latest_frames:
@@ -444,11 +485,18 @@ class MainWindow(QMainWindow):
                 if not self._pump_triggered_on and elapsed >= self._pump_on_time:
                     self._relay.send_on()
                     self._pump_triggered_on = True
+                    self._log_event("pump_on")
                     self._update_pump_indicator()
                 if not self._pump_triggered_off and elapsed >= self._pump_off_time:
                     self._relay.send_off()
                     self._pump_triggered_off = True
+                    self._log_event("pump_off")
                     self._update_pump_indicator()
+
+            # Pump countdown in status bar
+            self._update_pump_countdown(elapsed)
+        else:
+            self._status_pump_countdown.setText("")
 
         # Update pump indicator
         self._update_pump_indicator()
@@ -469,18 +517,58 @@ class MainWindow(QMainWindow):
         except Exception:
             self._status_disk.setText("")
 
+    def _update_pump_countdown(self, elapsed: float):
+        """Update the pump countdown label in the status bar."""
+        if not self._pump_auto_enabled:
+            self._status_pump_countdown.setText("")
+            return
+
+        if not self._pump_triggered_on:
+            remaining = self._pump_on_time - elapsed
+            if remaining > 0:
+                m, s = divmod(int(remaining), 60)
+                self._status_pump_countdown.setText(f"Pump ON in {m:02d}:{s:02d}")
+                return
+
+        if not self._pump_triggered_off:
+            remaining = self._pump_off_time - elapsed
+            if remaining > 0:
+                m, s = divmod(int(remaining), 60)
+                self._status_pump_countdown.setText(f"Pump OFF in {m:02d}:{s:02d}")
+                return
+
+        self._status_pump_countdown.setText("")
+
     def _toggle_recording(self):
+        """Toggle between starting and stopping a recording session."""
         if self._recording:
             self._stop_recording()
         else:
             self._start_recording()
 
     def _start_recording(self):
+        """Validate settings, open output files, and begin recording on all active cameras."""
         # Parse duration
         duration_secs = self._parse_duration(self._duration_input.text())
         if duration_secs is None:
             self._status_recording.setText("Invalid duration")
             return
+
+        # Disk space warning
+        try:
+            usage = shutil.disk_usage(self._output_dir)
+            free_gb = usage.free / (1024 ** 3)
+            if free_gb < 10:
+                reply = QMessageBox.warning(
+                    self, "Low Disk Space",
+                    f"Only {free_gb:.1f} GB free. Continue recording?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+        except Exception:
+            pass
 
         # Get settings
         res = self._res_combo.currentData()
@@ -506,11 +594,14 @@ class MainWindow(QMainWindow):
 
         file_prefix = f"{prefix}_" if prefix else ""
 
+        # Open events CSV
+        self._open_event_csv(out_dir, file_prefix)
+
         # Start recording on active cameras
         if self._cam0 is not None:
-            self._cam0.start_recording(str(out_dir / f"{file_prefix}cam0{ext}"), duration_secs)
+            self._cam0.start_recording(str(out_dir / f"{file_prefix}top{ext}"), duration_secs)
         if self._cam1 is not None:
-            self._cam1.start_recording(str(out_dir / f"{file_prefix}cam1{ext}"), duration_secs)
+            self._cam1.start_recording(str(out_dir / f"{file_prefix}front{ext}"), duration_secs)
 
         self._recording = True
         self._record_start = time.monotonic()
@@ -518,24 +609,34 @@ class MainWindow(QMainWindow):
         self._record_btn.setStyleSheet("font-weight: bold; padding: 8px; background-color: #c0392b; color: white;")
         self._status_recording.setText("Recording")
 
+        self._log_event("capture_start")
+
         # Pump auto setup
         self._pump_auto_enabled = self._pump_auto_check.isChecked()
         self._pump_triggered_on = False
         self._pump_triggered_off = False
-        try:
-            self._pump_on_time = float(self._pump_on_input.text())
-            self._pump_off_time = float(self._pump_off_input.text())
-        except ValueError:
+        on_secs = self._parse_duration(self._pump_on_input.text())
+        off_secs = self._parse_duration(self._pump_off_input.text())
+        if on_secs is not None and off_secs is not None:
+            self._pump_on_time = on_secs
+            self._pump_off_time = off_secs
+        else:
             self._pump_auto_enabled = False
 
         # Disable controls during recording
         self._set_controls_enabled(False)
 
     def _stop_recording(self):
+        """Stop all cameras, close the events CSV, and write the stats log."""
+        self._log_event("capture_stop")
+
         if self._cam0 is not None:
             self._cam0.stop_recording()
         if self._cam1 is not None:
             self._cam1.stop_recording()
+
+        # Close events CSV
+        self._close_event_csv()
 
         # Write stats log
         self._write_stats_log()
@@ -549,6 +650,7 @@ class MainWindow(QMainWindow):
         self._record_btn.setStyleSheet("font-weight: bold; padding: 8px;")
         self._status_recording.setText("Idle")
         self._status_elapsed.setText("00:00.0")
+        self._status_pump_countdown.setText("")
 
         # Turn off pump if auto was enabled
         if self._pump_auto_enabled and self._relay:
@@ -558,6 +660,7 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(True)
 
     def _set_controls_enabled(self, enabled: bool):
+        """Enable or disable recording-related controls."""
         self._prefix_input.setEnabled(enabled)
         self._duration_input.setEnabled(enabled)
         self._res_combo.setEnabled(enabled)
@@ -567,7 +670,7 @@ class MainWindow(QMainWindow):
         self._cam1_combo.setEnabled(enabled)
 
     def _parse_duration(self, text: str) -> Optional[float]:
-        """Parse mm:ss or just seconds."""
+        """Parse mm:ss or plain seconds into a float."""
         text = text.strip()
         try:
             if ":" in text:
@@ -577,9 +680,49 @@ class MainWindow(QMainWindow):
         except (ValueError, IndexError):
             return None
 
+    # ── Events CSV ──────────────────────────────────────────────────
+
+    def _open_event_csv(self, out_dir: Path, file_prefix: str):
+        """Open the events CSV sidecar file for writing."""
+        try:
+            csv_path = out_dir / f"{file_prefix}events.csv"
+            self._event_csv_file = open(csv_path, "w", newline="")
+            self._event_csv_writer = csv.writer(self._event_csv_file)
+            self._event_csv_writer.writerow(["timestamp_ms", "frame_top", "frame_front", "event"])
+        except Exception as e:
+            log.error("Failed to open events CSV: %s", e)
+            self._event_csv_file = None
+            self._event_csv_writer = None
+
+    def _close_event_csv(self):
+        """Flush and close the events CSV file."""
+        if self._event_csv_file:
+            try:
+                self._event_csv_file.close()
+            except Exception as e:
+                log.error("Failed to close events CSV: %s", e)
+        self._event_csv_file = None
+        self._event_csv_writer = None
+
+    def _log_event(self, event: str):
+        """Write a row to the events CSV with current timestamp and frame counts."""
+        if not self._event_csv_writer:
+            return
+        elapsed_ms = 0
+        if self._record_start:
+            elapsed_ms = int((time.monotonic() - self._record_start) * 1000)
+        frame_top = self._cam0._frame_count if self._cam0 else 0
+        frame_front = self._cam1._frame_count if self._cam1 else 0
+        try:
+            self._event_csv_writer.writerow([elapsed_ms, frame_top, frame_front, event])
+            self._event_csv_file.flush()
+        except Exception as e:
+            log.error("Failed to write event: %s", e)
+
     # ── Relay ────────────────────────────────────────────────────────
 
     def _refresh_ports(self):
+        """Refresh the serial port combo box with available ports."""
         self._port_combo.clear()
         if self.dummy:
             self._port_combo.addItem("MOCK")
@@ -593,6 +736,7 @@ class MainWindow(QMainWindow):
                     break
 
     def _connect_relay(self):
+        """Open a serial connection to the selected relay port."""
         if self.dummy:
             self._pump_indicator.setText("Relay: connected (mock)")
             return
@@ -612,20 +756,28 @@ class MainWindow(QMainWindow):
             log.error("Relay connect failed: %s", e)
 
     def _test_relay(self):
+        """Run a quick on/off relay test cycle."""
         if self._relay:
             self._relay.test_relay()
 
     def _pump_on(self):
+        """Manually turn the pump relay on."""
         if self._relay:
             self._relay.send_on()
+            if self._recording:
+                self._log_event("pump_on")
             self._update_pump_indicator()
 
     def _pump_off(self):
+        """Manually turn the pump relay off."""
         if self._relay:
             self._relay.send_off()
+            if self._recording:
+                self._log_event("pump_off")
             self._update_pump_indicator()
 
     def _update_pump_indicator(self):
+        """Update the pump state indicator in both the sidebar and status bar."""
         if self._relay:
             state = "ON" if self._relay.is_on else "OFF"
             self._status_pump.setText(f"Pump: {state}")
@@ -636,12 +788,14 @@ class MainWindow(QMainWindow):
     # ── Output ───────────────────────────────────────────────────────
 
     def _pick_output_dir(self):
+        """Open a directory picker to choose the output folder."""
         path = QFileDialog.getExistingDirectory(self, "Select Output Directory", self._output_dir)
         if path:
             self._output_dir = path
             self._output_label.setText(path)
 
     def _open_output_dir(self):
+        """Open the output directory in the system file manager."""
         path = self._output_dir
         Path(path).mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
@@ -654,6 +808,7 @@ class MainWindow(QMainWindow):
     # ── Stats Log ────────────────────────────────────────────────────
 
     def _write_stats_log(self):
+        """Write accumulated per-second stats to a JSONL file."""
         if not self._record_out_dir or not self._stats_log:
             return
         log_path = self._record_out_dir / "capture_stats.jsonl"
@@ -683,6 +838,7 @@ class MainWindow(QMainWindow):
     # ── Config ───────────────────────────────────────────────────────
 
     def _save_current_config(self):
+        """Persist all current settings to the config file."""
         self._cfg.update({
             "output_dir": self._output_dir,
             "video_prefix": self._prefix_input.text().strip(),
@@ -702,7 +858,9 @@ class MainWindow(QMainWindow):
     # ── Cleanup ──────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        """Save config, stop cameras, and close the relay on exit."""
         self._save_current_config()
+        self._close_event_csv()
         for cam in (self._cam0, self._cam1):
             if cam is not None:
                 cam.stop()

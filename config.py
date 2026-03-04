@@ -1,3 +1,9 @@
+"""Configuration persistence for Fish Capture.
+
+Stores and retrieves user settings as JSON in ~/.fishcapture/config.json.
+Provides sensible defaults for all settings.
+"""
+
 import json
 import logging
 from pathlib import Path
@@ -8,7 +14,7 @@ log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path.home() / ".fishcapture" / "config.json"
 
 DEFAULTS = {
-    "output_dir": str(Path.home() / "fish-capture"),
+    "output_dir": str(Path.home() / "FishCapture"),
     "duration": "05:00",
     "resolution": "640x480",
     "fps": 30,
@@ -17,8 +23,8 @@ DEFAULTS = {
     "cam1_device": 1,
     "pump_port": "",
     "pump_auto": True,
-    "pump_on_time": 120,
-    "pump_off_time": 240,
+    "pump_on_time": "02:00",
+    "pump_off_time": "04:00",
     "video_prefix": "",
 }
 

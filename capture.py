@@ -1,3 +1,10 @@
+"""Camera capture threads and device enumeration.
+
+Provides CameraThread for real USB cameras and DummyCameraThread for
+hardware-free development. Both emit frames, stats, and recording-finished
+signals compatible with the MainWindow slots.
+"""
+
 import collections
 import logging
 import os
@@ -124,6 +131,12 @@ class CameraThread(QThread):
     stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
 
     def __init__(self, camera_index: int, device_id: int = 0):
+        """Initialise the camera thread.
+
+        Args:
+            camera_index: Logical index (0 = top, 1 = front).
+            device_id: OS device index passed to cv2.VideoCapture.
+        """
         super().__init__()
         self.camera_index = camera_index
         self.device_id = device_id
@@ -144,16 +157,25 @@ class CameraThread(QThread):
         self._write_latencies: collections.deque = collections.deque()
 
     def set_resolution(self, width: int, height: int):
+        """Set the target capture resolution."""
         self._target_width = width
         self._target_height = height
 
     def set_fps(self, fps: float):
+        """Set the target capture frame rate."""
         self._target_fps = fps
 
     def set_codec(self, codec: str):
+        """Set the video codec name (must be a key in CODECS)."""
         self._codec = codec
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
+        """Begin recording frames to disk.
+
+        Args:
+            output_path: File path for the output video.
+            duration_seconds: Auto-stop after this many seconds, or None for manual stop.
+        """
         self._output_path = output_path
         self._duration_seconds = duration_seconds
         self._record_start_time = None
@@ -165,13 +187,16 @@ class CameraThread(QThread):
         self._recording = True
 
     def stop_recording(self):
+        """Signal the thread to stop recording after the current frame."""
         self._recording = False
 
     def stop(self):
+        """Signal the thread to exit its run loop."""
         self._running = False
         self._recording = False
 
     def _emit_stats(self):
+        """Compute and emit FPS, bitrate, and write latency stats (~1Hz)."""
         now = time.monotonic()
         if now - self._last_stats_time < 1.0:
             return
@@ -205,6 +230,7 @@ class CameraThread(QThread):
         self.stats_updated.emit(self.camera_index, fps, bitrate, avg_latency_ms)
 
     def run(self):
+        """Main capture loop: read frames, write to disk if recording, pace to target FPS."""
         self._running = True
         cap = cv2.VideoCapture(self.device_id)
 
@@ -317,6 +343,12 @@ class DummyCameraThread(QThread):
     stats_updated = pyqtSignal(int, float, float, float)  # camera_index, fps, bitrate_mbps, avg_write_latency_ms
 
     def __init__(self, camera_index: int, device_id: int = 0):
+        """Initialise the dummy camera thread.
+
+        Args:
+            camera_index: Logical index (0 = top, 1 = front).
+            device_id: Ignored, accepted for API compatibility.
+        """
         super().__init__()
         self.camera_index = camera_index
         self.device_id = device_id
@@ -338,16 +370,20 @@ class DummyCameraThread(QThread):
         self._tick = 0
 
     def set_resolution(self, width: int, height: int):
+        """Set the target frame dimensions."""
         self._target_width = width
         self._target_height = height
 
     def set_fps(self, fps: float):
+        """Set the target frame rate."""
         self._target_fps = fps
 
     def set_codec(self, codec: str):
+        """Set the video codec name."""
         self._codec = codec
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
+        """Begin recording generated frames to disk."""
         self._output_path = output_path
         self._duration_seconds = duration_seconds
         self._record_start_time = None
@@ -359,13 +395,16 @@ class DummyCameraThread(QThread):
         self._recording = True
 
     def stop_recording(self):
+        """Signal the thread to stop recording."""
         self._recording = False
 
     def stop(self):
+        """Signal the thread to exit its run loop."""
         self._running = False
         self._recording = False
 
     def _emit_stats(self):
+        """Compute and emit FPS, bitrate, and write latency stats (~1Hz)."""
         now = time.monotonic()
         if now - self._last_stats_time < 1.0:
             return
@@ -423,6 +462,7 @@ class DummyCameraThread(QThread):
         return frame
 
     def run(self):
+        """Main loop: generate synthetic frames, optionally write to disk, pace to target FPS."""
         self._running = True
         log.info("Dummy camera %d started: %dx%d", self.camera_index, self._target_width, self._target_height)
 
