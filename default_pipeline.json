@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "shared": false,
+  "pipelines": {
+    "shared": [],
+    "top": [],
+    "front": [
+      {
+        "name": "BilateralFilter",
+        "enabled": true,
+        "params": {
+          "d": 15,
+          "sigma_color": 75.0,
+          "sigma_space": 75.0
+        }
+      }
+    ]
+  }
+}
