@@ -1,4 +1,4 @@
-"""Main GUI window for Fish Capture.
+"""Main GUI window for Fish-On.
 
 Provides dual-camera preview, recording controls, serial relay pump control,
 and an events CSV sidecar log for each capture session.
@@ -85,7 +85,7 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         self.dummy = dummy
-        self.setWindowTitle("Fish Capture" + (" [DUMMY]" if dummy else ""))
+        self.setWindowTitle("Fish-On" + (" [DUMMY]" if dummy else ""))
         self.setMinimumSize(1100, 700)
 
         self._cfg = load_config()
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self._pump_off_time = 0.0
         self._pump_triggered_on = False
         self._pump_triggered_off = False
-        self._output_dir = self._cfg.get("output_dir", str(Path.home() / "FishCapture"))
+        self._output_dir = self._cfg.get("output_dir", str(Path.home() / "FishOn"))
         self._latest_raw_frames: dict[int, np.ndarray] = {}
         self._latest_filtered_frames: dict[int, np.ndarray] = {}
         # Keep old name for backward compat in _on_tick

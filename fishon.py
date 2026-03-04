@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fish Tank Research Capture System — entry point.
+"""Fish-On — entry point.
 
 Sets up logging (console + rotating file), applies the dark theme,
 and launches the main GUI window.
@@ -132,10 +132,10 @@ def _setup_logging():
     root.addHandler(console)
 
     # Rotating file handler
-    log_dir = Path.home() / ".fishcapture"
+    log_dir = Path.home() / ".fishon"
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_dir / "fishcapture.log",
+        log_dir / "fishon.log",
         maxBytes=5 * 1024 * 1024,
         backupCount=5,
     )
@@ -145,7 +145,7 @@ def _setup_logging():
 
 def main():
     """Parse arguments, set up logging, and launch the application."""
-    parser = argparse.ArgumentParser(description="Fish Tank Research Capture System")
+    parser = argparse.ArgumentParser(description="Fish-On Capture System")
     parser.add_argument(
         "--dummy", action="store_true",
         help="Run with synthetic cameras and mock relay (no hardware needed)",

@@ -1,6 +1,6 @@
-"""Configuration persistence for Fish Capture.
+"""Configuration persistence for Fish-On.
 
-Stores and retrieves user settings as JSON in ~/.fishcapture/config.json.
+Stores and retrieves user settings as JSON in ~/.fishon/config.json.
 Provides sensible defaults for all settings.
 """
 
@@ -11,10 +11,10 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = Path.home() / ".fishcapture" / "config.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".fishon" / "config.json"
 
 DEFAULTS = {
-    "output_dir": str(Path.home() / "FishCapture"),
+    "output_dir": str(Path.home() / "FishOn"),
     "duration": "05:00",
     "resolution": "640x480",
     "fps": 30,
