@@ -84,6 +84,11 @@ class FilterPipeline:
         with self._lock:
             self._filters = filters
 
+    def has_enabled_filters(self) -> bool:
+        """Return True if at least one filter is enabled."""
+        with self._lock:
+            return any(f.enabled for f in self._filters)
+
     def __len__(self):
         with self._lock:
             return len(self._filters)
