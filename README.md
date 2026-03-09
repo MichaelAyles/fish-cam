@@ -64,9 +64,9 @@ python fishon.py --dummy
 | Setting | Default |
 |---------|---------|
 | Duration | 05:00 |
-| Resolution | 640x480 |
+| Resolution | 1280x720 |
 | FPS | 30 |
-| Codec | FFV1 |
+| Codec | MJPEG |
 | Pump ON | 02:00 |
 | Pump OFF | 04:00 |
 

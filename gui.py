@@ -348,7 +348,7 @@ class MainWindow(QMainWindow):
         for w, h in RESOLUTIONS:
             self._res_combo.addItem(f"{w}x{h}", (w, h))
         # Restore saved resolution
-        saved_res = self._cfg.get("resolution", "640x480")
+        saved_res = self._cfg.get("resolution", "1280x720")
         idx = self._res_combo.findText(saved_res)
         self._res_combo.setCurrentIndex(idx if idx >= 0 else 0)
         res_row.addWidget(self._res_combo)
@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
         self._codec_combo = QComboBox()
         for name in CODECS:
             self._codec_combo.addItem(name)
-        saved_codec = self._cfg.get("codec", "FFV1")
+        saved_codec = self._cfg.get("codec", "MJPEG")
         idx = self._codec_combo.findText(saved_codec)
         if idx >= 0:
             self._codec_combo.setCurrentIndex(idx)

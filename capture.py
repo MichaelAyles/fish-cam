@@ -145,9 +145,9 @@ class CameraThread(QThread):
         self._recording = False
         self._writer: Optional[cv2.VideoWriter] = None
         self._target_fps = 30.0
-        self._target_width = 640
-        self._target_height = 480
-        self._codec = "FFV1"
+        self._target_width = 1280
+        self._target_height = 720
+        self._codec = "MJPEG"
         self._output_path: Optional[str] = None
         self._duration_seconds: Optional[float] = None
         self._record_start_time: Optional[float] = None
@@ -402,9 +402,9 @@ class DummyCameraThread(QThread):
         self._recording = False
         self._writer: Optional[cv2.VideoWriter] = None
         self._target_fps = 30.0
-        self._target_width = 640
-        self._target_height = 480
-        self._codec = "FFV1"
+        self._target_width = 1280
+        self._target_height = 720
+        self._codec = "MJPEG"
         self._output_path: Optional[str] = None
         self._duration_seconds: Optional[float] = None
         self._record_start_time: Optional[float] = None
