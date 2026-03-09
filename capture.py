@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -140,6 +141,7 @@ class CameraThread(QThread):
         self.camera_index = camera_index
         self.device_id = device_id
         self._running = False
+        self._lock = threading.Lock()
         self._recording = False
         self._writer: Optional[cv2.VideoWriter] = None
         self._target_fps = 30.0
@@ -188,24 +190,27 @@ class CameraThread(QThread):
             output_path: File path for the output video.
             duration_seconds: Auto-stop after this many seconds, or None for manual stop.
         """
-        self._output_path = output_path
-        self._duration_seconds = duration_seconds
-        self._record_start_time = None
-        self._frame_count = 0
-        self._frame_timestamps.clear()
-        self._write_latencies.clear()
-        self._last_stats_time = 0.0
-        self._last_file_size = 0
-        self._recording = True
+        with self._lock:
+            self._output_path = output_path
+            self._duration_seconds = duration_seconds
+            self._record_start_time = None
+            self._frame_count = 0
+            self._frame_timestamps.clear()
+            self._write_latencies.clear()
+            self._last_stats_time = 0.0
+            self._last_file_size = 0
+            self._recording = True
 
     def stop_recording(self):
         """Signal the thread to stop recording after the current frame."""
-        self._recording = False
+        with self._lock:
+            self._recording = False
 
     def stop(self):
         """Signal the thread to exit its run loop."""
         self._running = False
-        self._recording = False
+        with self._lock:
+            self._recording = False
 
     def _emit_stats(self):
         """Compute and emit FPS, bitrate, and write latency stats (~1Hz)."""
@@ -292,7 +297,10 @@ class CameraThread(QThread):
             filtered = self._pipeline.apply(frame) if self._pipeline else frame
             self.frame_ready.emit(self.camera_index, filtered)
 
-            if self._recording:
+            with self._lock:
+                recording = self._recording
+
+            if recording:
                 # Ensure BGR for VideoWriter (pipeline may output grayscale)
                 filtered_bgr = _ensure_bgr(filtered)
 
@@ -304,7 +312,9 @@ class CameraThread(QThread):
                     )
                     if not self._writer.isOpened():
                         self.error.emit(self.camera_index, "Failed to open VideoWriter")
-                        self._recording = False
+                        with self._lock:
+                            self._recording = False
+                        self._writer.release()
                         self._writer = None
                         continue
                     self._record_start_time = time.monotonic()
@@ -335,7 +345,8 @@ class CameraThread(QThread):
 
                 if self._duration_seconds and self._record_start_time and \
                         time.monotonic() - self._record_start_time >= self._duration_seconds:
-                    self._recording = False
+                    with self._lock:
+                        self._recording = False
                     self._writer.release()
                     self._writer = None
                     if self._raw_writer is not None:
@@ -387,6 +398,7 @@ class DummyCameraThread(QThread):
         self.camera_index = camera_index
         self.device_id = device_id
         self._running = False
+        self._lock = threading.Lock()
         self._recording = False
         self._writer: Optional[cv2.VideoWriter] = None
         self._target_fps = 30.0
@@ -431,24 +443,27 @@ class DummyCameraThread(QThread):
 
     def start_recording(self, output_path: str, duration_seconds: Optional[float] = None):
         """Begin recording generated frames to disk."""
-        self._output_path = output_path
-        self._duration_seconds = duration_seconds
-        self._record_start_time = None
-        self._frame_count = 0
-        self._frame_timestamps.clear()
-        self._write_latencies.clear()
-        self._last_stats_time = 0.0
-        self._last_file_size = 0
-        self._recording = True
+        with self._lock:
+            self._output_path = output_path
+            self._duration_seconds = duration_seconds
+            self._record_start_time = None
+            self._frame_count = 0
+            self._frame_timestamps.clear()
+            self._write_latencies.clear()
+            self._last_stats_time = 0.0
+            self._last_file_size = 0
+            self._recording = True
 
     def stop_recording(self):
         """Signal the thread to stop recording."""
-        self._recording = False
+        with self._lock:
+            self._recording = False
 
     def stop(self):
         """Signal the thread to exit its run loop."""
         self._running = False
-        self._recording = False
+        with self._lock:
+            self._recording = False
 
     def _emit_stats(self):
         """Compute and emit FPS, bitrate, and write latency stats (~1Hz)."""
@@ -521,7 +536,10 @@ class DummyCameraThread(QThread):
             filtered = self._pipeline.apply(frame) if self._pipeline else frame
             self.frame_ready.emit(self.camera_index, filtered)
 
-            if self._recording:
+            with self._lock:
+                recording = self._recording
+
+            if recording:
                 filtered_bgr = _ensure_bgr(filtered)
 
                 if self._writer is None:
@@ -530,6 +548,13 @@ class DummyCameraThread(QThread):
                     self._writer = cv2.VideoWriter(
                         self._output_path, fourcc, self._target_fps, (w, h)
                     )
+                    if not self._writer.isOpened():
+                        self.error.emit(self.camera_index, "Failed to open VideoWriter")
+                        with self._lock:
+                            self._recording = False
+                        self._writer.release()
+                        self._writer = None
+                        continue
                     self._record_start_time = time.monotonic()
                     if self._record_raw and self._raw_output_path:
                         rh, rw = frame.shape[:2]
@@ -555,7 +580,8 @@ class DummyCameraThread(QThread):
 
                 if self._duration_seconds and self._record_start_time and \
                         time.monotonic() - self._record_start_time >= self._duration_seconds:
-                    self._recording = False
+                    with self._lock:
+                        self._recording = False
                     self._writer.release()
                     self._writer = None
                     if self._raw_writer is not None:

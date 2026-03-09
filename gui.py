@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Union
 
@@ -90,7 +90,8 @@ class MainWindow(QMainWindow):
 
         self._cfg = load_config()
         self._recording = False
-        self._record_start: Optional[float] = None
+        self._record_start: Optional[float] = None  # monotonic
+        self._record_start_utc: Optional[datetime] = None  # wall clock
         self._record_out_dir: Optional[Path] = None
         self._cam_stats: dict[int, tuple[float, float, float]] = {}  # camera_index -> (fps, bitrate, latency_ms)
         self._stats_log: list[dict] = []
@@ -503,7 +504,11 @@ class MainWindow(QMainWindow):
         # Accumulate for stats log
         if self._recording:
             elapsed = time.monotonic() - self._record_start if self._record_start else 0
+
+            abs_utc = (self._record_start_utc + timedelta(seconds=elapsed)).isoformat(timespec="milliseconds") + "Z" \
+                if self._record_start_utc else datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
             self._stats_log.append({
+                "datetime_utc": abs_utc,
                 "time_s": round(elapsed, 1),
                 "camera": camera_index,
                 "fps": round(fps, 2),
@@ -669,6 +674,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.error("Failed to save pipeline sidecar: %s", e)
 
+        # Reset stateful filters (e.g. background subtractors) for a clean capture
+        self._pipeline_manager.reset_all()
+
         # Start recording on active cameras
         # If pipeline has enabled filters: record both raw and filtered
         # If no filters: record raw only
@@ -685,6 +693,7 @@ class MainWindow(QMainWindow):
 
         self._recording = True
         self._record_start = time.monotonic()
+        self._record_start_utc = datetime.utcnow()
         self._record_btn.setText("Stop Recording")
         self._record_btn.setStyleSheet("font-weight: bold; padding: 8px; background-color: #c0392b; color: white;")
         self._status_recording.setText("Recording")
@@ -723,6 +732,7 @@ class MainWindow(QMainWindow):
 
         self._recording = False
         self._record_start = None
+        self._record_start_utc = None
         self._record_out_dir = None
         self._cam_stats.clear()
         self._status_stats.setText("")
@@ -768,7 +778,7 @@ class MainWindow(QMainWindow):
             csv_path = out_dir / f"{file_prefix}events.csv"
             self._event_csv_file = open(csv_path, "w", newline="")
             self._event_csv_writer = csv.writer(self._event_csv_file)
-            self._event_csv_writer.writerow(["timestamp_ms", "frame_top", "frame_front", "event"])
+            self._event_csv_writer.writerow(["datetime_utc", "timestamp_ms", "frame_top", "frame_front", "event"])
         except Exception as e:
             log.error("Failed to open events CSV: %s", e)
             self._event_csv_file = None
@@ -791,10 +801,13 @@ class MainWindow(QMainWindow):
         elapsed_ms = 0
         if self._record_start:
             elapsed_ms = int((time.monotonic() - self._record_start) * 1000)
+        from datetime import timedelta
+        abs_utc = (self._record_start_utc + timedelta(milliseconds=elapsed_ms)).isoformat(timespec="milliseconds") + "Z" \
+            if self._record_start_utc else datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
         frame_top = self._cam0._frame_count if self._cam0 else 0
         frame_front = self._cam1._frame_count if self._cam1 else 0
         try:
-            self._event_csv_writer.writerow([elapsed_ms, frame_top, frame_front, event])
+            self._event_csv_writer.writerow([abs_utc, elapsed_ms, frame_top, frame_front, event])
             self._event_csv_file.flush()
         except Exception as e:
             log.error("Failed to write event: %s", e)
