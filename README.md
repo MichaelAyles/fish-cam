@@ -99,7 +99,7 @@ datetime_utc,timestamp_ms,frame_top,frame_front,event
 The stats log is JSONL — first line is session metadata, subsequent lines are per-second samples:
 
 ```jsonl
-{"type": "session", "timestamp": "...", "resolution": "640x480", "fps": 30, ...}
+{"type": "session", "timestamp": "...", "resolution": "1280x720", "fps": 30, "codec": "MJPEG", ...}
 {"datetime_utc": "2026-03-09T11:37:01.000Z", "time_s": 1.0, "camera": 0, "fps": 29.97, "bitrate_mbps": 12.3, "write_latency_ms": 0.8}
 {"datetime_utc": "2026-03-09T11:37:01.000Z", "time_s": 1.0, "camera": 1, "fps": 30.01, "bitrate_mbps": 11.9, "write_latency_ms": 0.7}
 ```
